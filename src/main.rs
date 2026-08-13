@@ -154,10 +154,11 @@ pub fn implied_vol(market_price: f64, spot: f64, strike: f64, t: f64, r: f64, is
 pub struct AppState {
     pub spot_prices: Arc<std::sync::Mutex<std::collections::HashMap<String, f64>>>,
     pub vol_surface: Arc<std::sync::Mutex<std::collections::HashMap<String, f64>>>,
+    pub db: sqlx::SqlitePool,
 }
 
 impl AppState {
-    pub fn new() -> Self {
+    pub fn new(db: sqlx::SqlitePool) -> Self {
         let mut prices = std::collections::HashMap::new();
         prices.insert("XLM".into(), 0.1182);
         prices.insert("BTC".into(), 67420.50);
@@ -173,6 +174,7 @@ impl AppState {
         Self {
             spot_prices: Arc::new(std::sync::Mutex::new(prices)),
             vol_surface: Arc::new(std::sync::Mutex::new(vols)),
+            db,
         }
     }
 }
@@ -376,7 +378,12 @@ async fn get_protocol_stats(State(state): State<AppState>) -> Json<serde_json::V
 
 #[tokio::main]
 async fn main() {
-    let state = AppState::new();
+    dotenvy::dotenv().ok();
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "sqlite://zenith.db".to_string());
+    let pool = db::init_pool(&database_url).await;
+
+    let state = AppState::new(pool);
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
