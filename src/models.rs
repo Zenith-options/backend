@@ -28,6 +28,7 @@ pub struct Position {
     pub realized_pnl: Option<f64>,
     pub opened_at: String,
     pub closed_at: Option<String>,
+    pub strategy_id: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize)]
