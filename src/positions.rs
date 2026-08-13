@@ -6,13 +6,14 @@ use sqlx::{Sqlite, Transaction};
 
 use crate::auth::AuthUser;
 use crate::collateral::collateral_required;
+use crate::error::AppError;
 use crate::models::{Account, Position};
 use crate::{black_scholes, smile_vol, AppState, BSInputs};
 
 pub async fn get_account(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
-) -> Result<Json<Account>, StatusCode> {
+) -> Result<Json<Account>, AppError> {
     // Verify/login already creates this row, but stay defensive in case a
     // session outlives some future account-deletion path.
     sqlx::query(
@@ -44,7 +45,7 @@ pub async fn list_positions(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
     Query(q): Query<ListPositionsQuery>,
-) -> Result<Json<Vec<Position>>, StatusCode> {
+) -> Result<Json<Vec<Position>>, AppError> {
     // `? IS NULL OR column = ?` lets one query handle all four
     // status/strategy_id filter combinations without branching SQL.
     let positions: Vec<Position> = sqlx::query_as(
@@ -86,22 +87,23 @@ pub(crate) async fn open_position_in_tx(
     wallet_address: &str,
     req: &OpenPositionRequest,
     strategy_id: Option<&str>,
-) -> Result<Position, StatusCode> {
+) -> Result<Position, AppError> {
     if req.contracts <= 0.0 || req.strike <= 0.0 || req.expiry_days <= 0.0 {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(AppError::new(StatusCode::BAD_REQUEST, "contracts, strike, and expiry_days must all be positive"));
     }
     if req.option_type != "call" && req.option_type != "put" {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(AppError::new(StatusCode::BAD_REQUEST, "option_type must be \"call\" or \"put\""));
     }
     if req.position_type != "long" && req.position_type != "short" {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(AppError::new(StatusCode::BAD_REQUEST, "position_type must be \"long\" or \"short\""));
     }
 
     let (spot, base_vol) = {
         let prices = state.spot_prices.lock().unwrap();
         let vols = state.vol_surface.lock().unwrap();
-        let spot = *prices.get(&req.underlying).ok_or(StatusCode::NOT_FOUND)?;
-        let vol = *vols.get(&req.underlying).ok_or(StatusCode::NOT_FOUND)?;
+        let not_found = || AppError::new(StatusCode::NOT_FOUND, format!("unknown underlying \"{}\"", req.underlying));
+        let spot = *prices.get(&req.underlying).ok_or_else(not_found)?;
+        let vol = *vols.get(&req.underlying).ok_or_else(not_found)?;
         (spot, vol)
     };
 
@@ -142,7 +144,10 @@ pub(crate) async fn open_position_in_tx(
     // whatever's locked as collateral (across all positions, not just
     // this one) must cover this trade's premium debit/collateral.
     if new_balance - new_collateral_locked < 0.0 {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+        return Err(AppError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "insufficient buying power: this trade's premium/collateral would exceed balance minus locked collateral",
+        ));
     }
 
     sqlx::query("UPDATE accounts SET balance = ?, collateral_locked = ? WHERE wallet_address = ?")
@@ -189,7 +194,7 @@ pub async fn open_position(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
     Json(req): Json<OpenPositionRequest>,
-) -> Result<Json<Position>, StatusCode> {
+) -> Result<Json<Position>, AppError> {
     let mut tx = state.db.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let position = open_position_in_tx(&mut tx, &state, &wallet_address, &req, None).await?;
     tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -210,7 +215,7 @@ async fn close_position_in_tx(
     state: &AppState,
     wallet_address: &str,
     position_id: &str,
-) -> Result<Position, StatusCode> {
+) -> Result<Position, AppError> {
     let position: Position = sqlx::query_as(
         "SELECT * FROM positions WHERE id = ? AND wallet_address = ? AND status = 'open'",
     )
@@ -219,13 +224,16 @@ async fn close_position_in_tx(
     .fetch_optional(&mut **tx)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    .ok_or(StatusCode::NOT_FOUND)?;
+    .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, "no open position with that id for this wallet"))?;
 
     let (spot, base_vol) = {
         let prices = state.spot_prices.lock().unwrap();
         let vols = state.vol_surface.lock().unwrap();
-        let spot = *prices.get(&position.underlying).ok_or(StatusCode::NOT_FOUND)?;
-        let vol = *vols.get(&position.underlying).ok_or(StatusCode::NOT_FOUND)?;
+        let not_found = || {
+            AppError::new(StatusCode::NOT_FOUND, format!("unknown underlying \"{}\"", position.underlying))
+        };
+        let spot = *prices.get(&position.underlying).ok_or_else(not_found)?;
+        let vol = *vols.get(&position.underlying).ok_or_else(not_found)?;
         (spot, vol)
     };
 
@@ -290,7 +298,7 @@ pub async fn close_position(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
     Path(id): Path<String>,
-) -> Result<Json<Position>, StatusCode> {
+) -> Result<Json<Position>, AppError> {
     let mut tx = state.db.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let closed = close_position_in_tx(&mut tx, &state, &wallet_address, &id).await?;
     tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -317,7 +325,7 @@ pub async fn roll_position(
     AuthUser(wallet_address): AuthUser,
     Path(id): Path<String>,
     Json(req): Json<RollPositionRequest>,
-) -> Result<Json<RollResult>, StatusCode> {
+) -> Result<Json<RollResult>, AppError> {
     let mut tx = state.db.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut closed = close_position_in_tx(&mut tx, &state, &wallet_address, &id).await?;
@@ -361,7 +369,7 @@ pub struct AggregateGreeks {
 pub async fn get_portfolio_greeks(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
-) -> Result<Json<AggregateGreeks>, StatusCode> {
+) -> Result<Json<AggregateGreeks>, AppError> {
     let open_positions: Vec<Position> =
         sqlx::query_as("SELECT * FROM positions WHERE wallet_address = ? AND status = 'open'")
             .bind(&wallet_address)

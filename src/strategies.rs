@@ -4,6 +4,7 @@ use axum::response::Json;
 use serde::Deserialize;
 
 use crate::auth::AuthUser;
+use crate::error::AppError;
 use crate::models::Position;
 use crate::positions::{open_position_in_tx, OpenPositionRequest};
 use crate::AppState;
@@ -21,11 +22,11 @@ pub async fn execute_strategy(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
     Json(req): Json<ExecuteStrategyRequest>,
-) -> Result<Json<Vec<Position>>, StatusCode> {
+) -> Result<Json<Vec<Position>>, AppError> {
     if req.legs.len() < 2 {
         // A single "strategy" leg is just a plain open — use
         // /api/v1/positions/open for that instead.
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(AppError::new(StatusCode::BAD_REQUEST, "a strategy needs at least 2 legs; use /api/v1/positions/open for a single leg"));
     }
 
     let strategy_id = uuid::Uuid::new_v4().to_string();
