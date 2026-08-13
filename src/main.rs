@@ -17,6 +17,7 @@ mod history;
 mod models;
 mod positions;
 mod strkey;
+mod watchlist;
 
 // ─── Black-Scholes Pricing Engine ─────────────────────────────────────────────
 
@@ -413,6 +414,7 @@ async fn main() {
         .route("/api/v1/positions/:id/close", post(positions::close_position))
         .route("/api/v1/positions/:id/roll", post(positions::roll_position))
         .route("/api/v1/history", get(history::get_history))
+        .route("/api/v1/watchlist", get(watchlist::get_watchlist))
         .layer(cors)
         .with_state(state);
 
