@@ -293,3 +293,42 @@ pub async fn close_position(
     tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(closed))
 }
+
+#[derive(Deserialize)]
+pub struct RollPositionRequest {
+    pub new_strike: f64,
+    pub new_expiry_days: f64,
+}
+
+#[derive(serde::Serialize)]
+pub struct RollResult {
+    pub closed: Position,
+    pub opened: Position,
+}
+
+/// Closes the given position and immediately opens its replacement (same
+/// underlying/option_type/position_type/contracts, new strike and expiry)
+/// as one atomic transaction — either both happen or neither does.
+pub async fn roll_position(
+    State(state): State<AppState>,
+    AuthUser(wallet_address): AuthUser,
+    Path(id): Path<String>,
+    Json(req): Json<RollPositionRequest>,
+) -> Result<Json<RollResult>, StatusCode> {
+    let mut tx = state.db.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let closed = close_position_in_tx(&mut tx, &state, &wallet_address, &id).await?;
+
+    let open_req = OpenPositionRequest {
+        underlying: closed.underlying.clone(),
+        strike: req.new_strike,
+        expiry_days: req.new_expiry_days,
+        option_type: closed.option_type.clone(),
+        position_type: closed.position_type.clone(),
+        contracts: closed.contracts,
+    };
+    let opened = open_position_in_tx(&mut tx, &state, &wallet_address, &open_req).await?;
+
+    tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(RollResult { closed, opened }))
+}

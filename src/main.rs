@@ -410,6 +410,7 @@ async fn main() {
         .route("/api/v1/positions", get(positions::list_positions))
         .route("/api/v1/positions/open", post(positions::open_position))
         .route("/api/v1/positions/:id/close", post(positions::close_position))
+        .route("/api/v1/positions/:id/roll", post(positions::roll_position))
         .layer(cors)
         .with_state(state);
 
