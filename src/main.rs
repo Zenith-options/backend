@@ -10,6 +10,7 @@ use std::{f64::consts::PI, sync::Arc};
 use tower_http::cors::{Any, CorsLayer};
 use axum::http::Method;
 
+mod alerts;
 mod auth;
 mod collateral;
 mod db;
@@ -419,6 +420,7 @@ async fn main() {
             get(watchlist::get_watchlist).post(watchlist::add_watchlist),
         )
         .route("/api/v1/watchlist/:underlying", axum::routing::delete(watchlist::remove_watchlist))
+        .route("/api/v1/alerts", get(alerts::get_alerts))
         .layer(cors)
         .with_state(state);
 
