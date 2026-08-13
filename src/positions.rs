@@ -1,7 +1,8 @@
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use serde::Deserialize;
+use sqlx::{Sqlite, Transaction};
 
 use crate::auth::AuthUser;
 use crate::collateral::collateral_required;
@@ -178,4 +179,105 @@ pub async fn open_position(
     tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(position))
+}
+
+/// Reprices an open position at the current spot/vol and settles it:
+/// releases any locked collateral, applies the closing cash flow to the
+/// account, and marks the row closed. Shared by the close and roll
+/// handlers so both settle a position the same way.
+///
+/// Simplification: this reprices with the *same* time-to-expiry the
+/// position was opened with rather than tracking real elapsed time
+/// against an absolute expiry timestamp — fine for a paper-trading demo,
+/// but not a real theta decay model.
+async fn close_position_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    state: &AppState,
+    wallet_address: &str,
+    position_id: &str,
+) -> Result<Position, StatusCode> {
+    let position: Position = sqlx::query_as(
+        "SELECT * FROM positions WHERE id = ? AND wallet_address = ? AND status = 'open'",
+    )
+    .bind(position_id)
+    .bind(wallet_address)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .ok_or(StatusCode::NOT_FOUND)?;
+
+    let (spot, base_vol) = {
+        let prices = state.spot_prices.lock().unwrap();
+        let vols = state.vol_surface.lock().unwrap();
+        let spot = *prices.get(&position.underlying).ok_or(StatusCode::NOT_FOUND)?;
+        let vol = *vols.get(&position.underlying).ok_or(StatusCode::NOT_FOUND)?;
+        (spot, vol)
+    };
+
+    let vol = smile_vol(base_vol, position.strike / spot);
+    let t = position.expiry_days / 365.0;
+    let is_call = position.option_type == "call";
+    let close_premium = black_scholes(&BSInputs { spot, strike: position.strike, vol, t, r: 0.05, is_call }).premium;
+
+    let is_short = position.position_type == "short";
+    let realized_pnl = if is_short {
+        (position.entry_premium - close_premium) * position.contracts
+    } else {
+        (close_premium - position.entry_premium) * position.contracts
+    };
+    let cash_delta = if is_short {
+        -close_premium * position.contracts // buy to close
+    } else {
+        close_premium * position.contracts // sell to close
+    };
+
+    let account: Account = sqlx::query_as("SELECT * FROM accounts WHERE wallet_address = ?")
+        .bind(wallet_address)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let new_balance = account.balance + cash_delta;
+    let new_collateral_locked = account.collateral_locked - position.collateral;
+
+    sqlx::query("UPDATE accounts SET balance = ?, collateral_locked = ? WHERE wallet_address = ?")
+        .bind(new_balance)
+        .bind(new_collateral_locked)
+        .bind(wallet_address)
+        .execute(&mut **tx)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    sqlx::query(
+        "UPDATE positions
+            SET status = 'closed', close_premium = ?, close_spot = ?, realized_pnl = ?,
+                closed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?",
+    )
+    .bind(close_premium)
+    .bind(spot)
+    .bind(realized_pnl)
+    .bind(position_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let closed: Position = sqlx::query_as("SELECT * FROM positions WHERE id = ?")
+        .bind(position_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(closed)
+}
+
+pub async fn close_position(
+    State(state): State<AppState>,
+    AuthUser(wallet_address): AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<Position>, StatusCode> {
+    let mut tx = state.db.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let closed = close_position_in_tx(&mut tx, &state, &wallet_address, &id).await?;
+    tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(closed))
 }
