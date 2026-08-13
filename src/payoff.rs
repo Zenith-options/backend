@@ -6,6 +6,8 @@ use axum::http::StatusCode;
 use axum::response::Json;
 use serde::{Deserialize, Serialize};
 
+use crate::error::AppError;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct PricedLeg {
     pub option_type: String,   // "call" | "put"
@@ -80,9 +82,15 @@ pub struct PayoffResponse {
 /// Stateless P&L math over caller-supplied legs (no pricing lookup, no
 /// auth) — the frontend's strategy builder already has each leg's
 /// premium from a prior /api/v1/price call before it needs this.
-pub async fn post_payoff(Json(req): Json<PayoffRequest>) -> Result<Json<PayoffResponse>, StatusCode> {
-    if req.legs.is_empty() || req.hi_spot <= req.lo_spot || req.steps == 0 {
-        return Err(StatusCode::BAD_REQUEST);
+pub async fn post_payoff(Json(req): Json<PayoffRequest>) -> Result<Json<PayoffResponse>, AppError> {
+    if req.legs.is_empty() {
+        return Err(AppError::new(StatusCode::BAD_REQUEST, "legs must not be empty"));
+    }
+    if req.hi_spot <= req.lo_spot {
+        return Err(AppError::new(StatusCode::BAD_REQUEST, "hi_spot must be greater than lo_spot"));
+    }
+    if req.steps == 0 {
+        return Err(AppError::new(StatusCode::BAD_REQUEST, "steps must be positive"));
     }
 
     let points = combined_payoff_series(&req.legs, req.lo_spot, req.hi_spot, req.steps);

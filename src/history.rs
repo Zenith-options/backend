@@ -4,6 +4,7 @@ use axum::response::Json;
 use serde::Serialize;
 
 use crate::auth::AuthUser;
+use crate::error::AppError;
 use crate::models::Position;
 use crate::AppState;
 
@@ -27,7 +28,7 @@ pub struct HistoryResponse {
 pub async fn get_history(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
-) -> Result<Json<HistoryResponse>, StatusCode> {
+) -> Result<Json<HistoryResponse>, AppError> {
     let trades: Vec<Position> = sqlx::query_as(
         "SELECT * FROM positions
             WHERE wallet_address = ? AND status IN ('closed', 'rolled')
