@@ -17,6 +17,7 @@ mod db;
 mod history;
 mod models;
 mod positions;
+mod prices;
 mod strkey;
 mod watchlist;
 
@@ -402,6 +403,7 @@ async fn main() {
     let state = AppState::new(pool);
     tokio::spawn(auth::cleanup_expired_loop(state.db.clone()));
     tokio::spawn(alerts::check_alerts_loop(state.clone()));
+    tokio::spawn(prices::price_simulator_loop(state.clone()));
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
