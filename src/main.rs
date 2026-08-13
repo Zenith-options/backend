@@ -264,7 +264,7 @@ async fn get_chain(
     let vols   = state.vol_surface.lock().unwrap();
 
     let spot = *prices.get(&q.underlying).ok_or(StatusCode::NOT_FOUND)?;
-    let vol  = *vols.get(&q.underlying).ok_or(StatusCode::NOT_FOUND)?;
+    let base_vol = *vols.get(&q.underlying).ok_or(StatusCode::NOT_FOUND)?;
     let t    = q.expiry_days / 365.0;
     let r    = 0.05_f64;
 
@@ -274,9 +274,12 @@ async fn get_chain(
     let mut chain  = Vec::new();
 
     for i in -(step_count as i32)..=(step_count as i32) {
-        let strike = (spot * (1.0 + i as f64 * step_pct) * 100.0).round() / 100.0;
+        // Round to 4dp, not 2 — 2dp collapses several adjacent strikes to
+        // the same value for a sub-$1 asset like XLM (spot ~0.118).
+        let strike = (spot * (1.0 + i as f64 * step_pct) * 10000.0).round() / 10000.0;
         if strike <= 0.0 { continue; }
 
+        let vol = smile_vol(base_vol, strike / spot);
         let call_inputs = BSInputs { spot, strike, vol, t, r, is_call: true };
         let put_inputs  = BSInputs { spot, strike, vol, t, r, is_call: false };
 
