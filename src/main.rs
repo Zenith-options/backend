@@ -12,6 +12,7 @@ use axum::http::Method;
 
 mod db;
 mod models;
+mod strkey;
 
 // ─── Black-Scholes Pricing Engine ─────────────────────────────────────────────
 
