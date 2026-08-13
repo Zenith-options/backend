@@ -36,6 +36,8 @@ pub async fn get_account(
 pub struct ListPositionsQuery {
     /// "open" | "closed" | "rolled" — omit to return every status.
     pub status: Option<String>,
+    /// Restrict to the legs of one multi-leg strategy — omit for everything.
+    pub strategy_id: Option<String>,
 }
 
 pub async fn list_positions(
@@ -43,23 +45,22 @@ pub async fn list_positions(
     AuthUser(wallet_address): AuthUser,
     Query(q): Query<ListPositionsQuery>,
 ) -> Result<Json<Vec<Position>>, StatusCode> {
-    let positions: Vec<Position> = match q.status {
-        Some(status) => {
-            sqlx::query_as(
-                "SELECT * FROM positions WHERE wallet_address = ? AND status = ? ORDER BY opened_at DESC",
-            )
-            .bind(&wallet_address)
-            .bind(&status)
-            .fetch_all(&state.db)
-            .await
-        }
-        None => {
-            sqlx::query_as("SELECT * FROM positions WHERE wallet_address = ? ORDER BY opened_at DESC")
-                .bind(&wallet_address)
-                .fetch_all(&state.db)
-                .await
-        }
-    }
+    // `? IS NULL OR column = ?` lets one query handle all four
+    // status/strategy_id filter combinations without branching SQL.
+    let positions: Vec<Position> = sqlx::query_as(
+        "SELECT * FROM positions
+            WHERE wallet_address = ?
+              AND (? IS NULL OR status = ?)
+              AND (? IS NULL OR strategy_id = ?)
+         ORDER BY opened_at DESC",
+    )
+    .bind(&wallet_address)
+    .bind(&q.status)
+    .bind(&q.status)
+    .bind(&q.strategy_id)
+    .bind(&q.strategy_id)
+    .fetch_all(&state.db)
+    .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(positions))
