@@ -311,7 +311,7 @@ async fn get_chain(
     let step_pct   = 0.05_f64;
     let mut chain  = Vec::new();
 
-    for i in -(step_count as i32)..=(step_count as i32) {
+    for i in -step_count..=step_count {
         // Round to 4dp, not 2 — 2dp collapses several adjacent strikes to
         // the same value for a sub-$1 asset like XLM (spot ~0.118).
         let strike = (spot * (1.0 + i as f64 * step_pct) * 10000.0).round() / 10000.0;
