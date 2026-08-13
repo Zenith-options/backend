@@ -162,6 +162,12 @@ pub struct AppState {
     pub spot_prices: Arc<std::sync::Mutex<std::collections::HashMap<String, f64>>>,
     pub vol_surface: Arc<std::sync::Mutex<std::collections::HashMap<String, f64>>>,
     pub db: sqlx::SqlitePool,
+    /// Broadcasts a JSON-encoded SpotResponse every time the price
+    /// simulator nudges spot_prices, for the /api/v1/ws/spot handler to
+    /// forward to connected clients. `send` errors (no receivers) are
+    /// expected and ignored — the simulator runs regardless of whether
+    /// anyone's listening.
+    pub spot_tx: tokio::sync::broadcast::Sender<String>,
 }
 
 impl AppState {
@@ -178,10 +184,13 @@ impl AppState {
         vols.insert("ETH".into(), 0.72);
         vols.insert("SOL".into(), 0.91);
 
+        let (spot_tx, _) = tokio::sync::broadcast::channel(16);
+
         Self {
             spot_prices: Arc::new(std::sync::Mutex::new(prices)),
             vol_surface: Arc::new(std::sync::Mutex::new(vols)),
             db,
+            spot_tx,
         }
     }
 }
