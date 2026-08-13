@@ -31,6 +31,21 @@ fn norm_pdf(x: f64) -> f64 {
     (-x * x / 2.0).exp() / (2.0 * PI).sqrt()
 }
 
+/// Realistic crypto vol smile: left (put) skew, curvature, wing term.
+/// Ported bit-for-bit from the frontend's lib/pricing.ts smileVol() so
+/// /api/v1/price and /api/v1/chain price consistently with what the client
+/// already shows — this previously used one flat vol per underlying for
+/// every strike. Note the wing term is `(|m|-0.15)^2` unconditionally: the
+/// frontend wraps it in `Math.max(0, ...)`, but a square can't be negative,
+/// so that outer clamp is a no-op there and is reproduced as a no-op here
+/// too, on purpose, for numeric parity rather than "fixing" a shipped quirk
+/// unilaterally on just one side.
+fn smile_vol(base: f64, moneyness: f64) -> f64 {
+    let m = moneyness - 1.0;
+    let wing = (m.abs() - 0.15).powi(2);
+    (base - 0.15 * m + 0.08 * m * m + 0.12 * wing).max(0.1)
+}
+
 #[derive(Debug, Clone)]
 pub struct BSInputs {
     pub spot: f64,       // current price
@@ -231,7 +246,8 @@ async fn price_option(
     let vols   = state.vol_surface.lock().unwrap();
 
     let spot = *prices.get(&q.underlying).ok_or(StatusCode::NOT_FOUND)?;
-    let vol  = *vols.get(&q.underlying).ok_or(StatusCode::NOT_FOUND)?;
+    let base_vol = *vols.get(&q.underlying).ok_or(StatusCode::NOT_FOUND)?;
+    let vol = smile_vol(base_vol, q.strike / spot);
 
     let t = q.expiry_days / 365.0;
     let is_call = q.option_type.to_lowercase() == "call";
