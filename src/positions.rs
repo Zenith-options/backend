@@ -1,7 +1,7 @@
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sqlx::{Sqlite, Transaction};
 
 use crate::auth::AuthUser;
@@ -340,4 +340,52 @@ pub async fn roll_position(
 
     tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(RollResult { closed, opened }))
+}
+
+#[derive(Serialize, Default)]
+pub struct AggregateGreeks {
+    pub delta: f64,
+    pub gamma: f64,
+    pub theta: f64,
+    pub vega: f64,
+}
+
+/// Sums each open position's current Greeks (repriced at today's
+/// spot/vol, not the entry-time values stored on the row), flipping sign
+/// for short positions — ported from the frontend's aggregateGreeks().
+pub async fn get_portfolio_greeks(
+    State(state): State<AppState>,
+    AuthUser(wallet_address): AuthUser,
+) -> Result<Json<AggregateGreeks>, StatusCode> {
+    let open_positions: Vec<Position> =
+        sqlx::query_as("SELECT * FROM positions WHERE wallet_address = ? AND status = 'open'")
+            .bind(&wallet_address)
+            .fetch_all(&state.db)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut totals = AggregateGreeks::default();
+    for p in &open_positions {
+        let (spot, base_vol) = {
+            let prices = state.spot_prices.lock().unwrap();
+            let vols = state.vol_surface.lock().unwrap();
+            match (prices.get(&p.underlying), vols.get(&p.underlying)) {
+                (Some(&s), Some(&v)) => (s, v),
+                _ => continue, // underlying delisted since this position was opened
+            }
+        };
+
+        let vol = smile_vol(base_vol, p.strike / spot);
+        let t = p.expiry_days / 365.0;
+        let is_call = p.option_type == "call";
+        let result = black_scholes(&BSInputs { spot, strike: p.strike, vol, t, r: 0.05, is_call });
+
+        let sign = if p.position_type == "short" { -1.0 } else { 1.0 };
+        totals.delta += sign * result.delta * p.contracts;
+        totals.gamma += sign * result.gamma * p.contracts;
+        totals.theta += sign * result.theta * p.contracts;
+        totals.vega += sign * result.vega * p.contracts;
+    }
+
+    Ok(Json(totals))
 }
