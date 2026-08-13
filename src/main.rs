@@ -437,6 +437,7 @@ async fn main() {
             get(alerts::get_alerts).post(alerts::create_alert),
         )
         .route("/api/v1/alerts/:id", axum::routing::delete(alerts::delete_alert))
+        .route("/api/v1/ws/spot", get(prices::ws_spot))
         .layer(cors)
         .with_state(state);
 
