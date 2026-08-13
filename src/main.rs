@@ -420,7 +420,10 @@ async fn main() {
             get(watchlist::get_watchlist).post(watchlist::add_watchlist),
         )
         .route("/api/v1/watchlist/:underlying", axum::routing::delete(watchlist::remove_watchlist))
-        .route("/api/v1/alerts", get(alerts::get_alerts))
+        .route(
+            "/api/v1/alerts",
+            get(alerts::get_alerts).post(alerts::create_alert),
+        )
         .layer(cors)
         .with_state(state);
 
