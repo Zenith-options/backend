@@ -75,11 +75,16 @@ pub struct OpenPositionRequest {
     pub contracts: f64,
 }
 
-pub async fn open_position(
-    State(state): State<AppState>,
-    AuthUser(wallet_address): AuthUser,
-    Json(req): Json<OpenPositionRequest>,
-) -> Result<Json<Position>, StatusCode> {
+/// Prices and inserts a new position, debiting/crediting the account and
+/// locking collateral as needed, all within the caller's transaction.
+/// Shared by the open handler and (once it exists) the roll handler, so
+/// rolling a position doesn't need to duplicate this logic.
+async fn open_position_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    state: &AppState,
+    wallet_address: &str,
+    req: &OpenPositionRequest,
+) -> Result<Position, StatusCode> {
     if req.contracts <= 0.0 || req.strike <= 0.0 || req.expiry_days <= 0.0 {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -123,11 +128,9 @@ pub async fn open_position(
         -entry_premium * req.contracts // premium paid
     };
 
-    let mut tx = state.db.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
     let account: Account = sqlx::query_as("SELECT * FROM accounts WHERE wallet_address = ?")
-        .bind(&wallet_address)
-        .fetch_one(&mut *tx)
+        .bind(wallet_address)
+        .fetch_one(&mut **tx)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -143,8 +146,8 @@ pub async fn open_position(
     sqlx::query("UPDATE accounts SET balance = ?, collateral_locked = ? WHERE wallet_address = ?")
         .bind(new_balance)
         .bind(new_collateral_locked)
-        .bind(&wallet_address)
-        .execute(&mut *tx)
+        .bind(wallet_address)
+        .execute(&mut **tx)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -156,7 +159,7 @@ pub async fn open_position(
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')",
     )
     .bind(&id)
-    .bind(&wallet_address)
+    .bind(wallet_address)
     .bind(&req.underlying)
     .bind(req.strike)
     .bind(req.expiry_days)
@@ -166,18 +169,27 @@ pub async fn open_position(
     .bind(entry_premium)
     .bind(spot)
     .bind(collateral)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let position: Position = sqlx::query_as("SELECT * FROM positions WHERE id = ?")
         .bind(&id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(position)
+}
 
+pub async fn open_position(
+    State(state): State<AppState>,
+    AuthUser(wallet_address): AuthUser,
+    Json(req): Json<OpenPositionRequest>,
+) -> Result<Json<Position>, StatusCode> {
+    let mut tx = state.db.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let position = open_position_in_tx(&mut tx, &state, &wallet_address, &req).await?;
+    tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(position))
 }
 
