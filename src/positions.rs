@@ -79,11 +79,12 @@ pub struct OpenPositionRequest {
 /// locking collateral as needed, all within the caller's transaction.
 /// Shared by the open handler and (once it exists) the roll handler, so
 /// rolling a position doesn't need to duplicate this logic.
-async fn open_position_in_tx(
+pub(crate) async fn open_position_in_tx(
     tx: &mut Transaction<'_, Sqlite>,
     state: &AppState,
     wallet_address: &str,
     req: &OpenPositionRequest,
+    strategy_id: Option<&str>,
 ) -> Result<Position, StatusCode> {
     if req.contracts <= 0.0 || req.strike <= 0.0 || req.expiry_days <= 0.0 {
         return Err(StatusCode::BAD_REQUEST);
@@ -155,8 +156,8 @@ async fn open_position_in_tx(
     sqlx::query(
         "INSERT INTO positions
             (id, wallet_address, underlying, strike, expiry_days, option_type,
-             position_type, contracts, entry_premium, entry_spot, collateral, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')",
+             position_type, contracts, entry_premium, entry_spot, collateral, status, strategy_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)",
     )
     .bind(&id)
     .bind(wallet_address)
@@ -169,6 +170,7 @@ async fn open_position_in_tx(
     .bind(entry_premium)
     .bind(spot)
     .bind(collateral)
+    .bind(strategy_id)
     .execute(&mut **tx)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -188,7 +190,7 @@ pub async fn open_position(
     Json(req): Json<OpenPositionRequest>,
 ) -> Result<Json<Position>, StatusCode> {
     let mut tx = state.db.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let position = open_position_in_tx(&mut tx, &state, &wallet_address, &req).await?;
+    let position = open_position_in_tx(&mut tx, &state, &wallet_address, &req, None).await?;
     tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(position))
 }
@@ -336,7 +338,9 @@ pub async fn roll_position(
         position_type: closed.position_type.clone(),
         contracts: closed.contracts,
     };
-    let opened = open_position_in_tx(&mut tx, &state, &wallet_address, &open_req).await?;
+    // Preserve strategy grouping across a roll: the replacement leg
+    // belongs to the same multi-leg strategy as the one it replaced.
+    let opened = open_position_in_tx(&mut tx, &state, &wallet_address, &open_req, closed.strategy_id.as_deref()).await?;
 
     tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(RollResult { closed, opened }))
