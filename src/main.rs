@@ -16,6 +16,7 @@ mod collateral;
 mod db;
 mod history;
 mod models;
+mod payoff;
 mod positions;
 mod prices;
 mod strkey;
