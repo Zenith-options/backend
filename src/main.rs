@@ -14,6 +14,7 @@ mod auth;
 mod collateral;
 mod db;
 mod models;
+mod positions;
 mod strkey;
 
 // ─── Black-Scholes Pricing Engine ─────────────────────────────────────────────
@@ -46,7 +47,7 @@ fn norm_pdf(x: f64) -> f64 {
 /// so that outer clamp is a no-op there and is reproduced as a no-op here
 /// too, on purpose, for numeric parity rather than "fixing" a shipped quirk
 /// unilaterally on just one side.
-fn smile_vol(base: f64, moneyness: f64) -> f64 {
+pub(crate) fn smile_vol(base: f64, moneyness: f64) -> f64 {
     let m = moneyness - 1.0;
     let wing = (m.abs() - 0.15).powi(2);
     (base - 0.15 * m + 0.08 * m * m + 0.12 * wing).max(0.1)
@@ -405,6 +406,7 @@ async fn main() {
         .route("/api/v1/auth/nonce", post(auth::post_nonce))
         .route("/api/v1/auth/verify", post(auth::post_verify))
         .route("/api/v1/auth/me", get(auth::get_me))
+        .route("/api/v1/account", get(positions::get_account))
         .layer(cors)
         .with_state(state);
 
