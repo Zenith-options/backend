@@ -2084,6 +2084,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "dashmap",
+ "dotenvy",
  "serde",
  "serde_json",
  "sqlx",
