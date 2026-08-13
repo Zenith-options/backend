@@ -439,6 +439,7 @@ async fn main() {
         )
         .route("/api/v1/alerts/:id", axum::routing::delete(alerts::delete_alert))
         .route("/api/v1/ws/spot", get(prices::ws_spot))
+        .route("/api/v1/portfolio/payoff", post(payoff::post_payoff))
         .layer(cors)
         .with_state(state);
 

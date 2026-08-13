@@ -2,6 +2,8 @@
 //! `lib/payoff.ts`. Pure functions over caller-supplied legs — no
 //! pricing or persistence here, just the P&L arithmetic.
 
+use axum::http::StatusCode;
+use axum::response::Json;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -54,6 +56,38 @@ pub fn net_premium(legs: &[PricedLeg]) -> f64 {
         let signed = if leg.position_type == "long" { leg.premium } else { -leg.premium };
         total + signed * leg.contracts
     })
+}
+
+#[derive(Deserialize)]
+pub struct PayoffRequest {
+    pub legs: Vec<PricedLeg>,
+    pub lo_spot: f64,
+    pub hi_spot: f64,
+    #[serde(default = "default_steps")]
+    pub steps: u32,
+}
+
+fn default_steps() -> u32 {
+    200
+}
+
+#[derive(Serialize)]
+pub struct PayoffResponse {
+    pub points: Vec<PayoffPoint>,
+    pub net_premium: f64,
+}
+
+/// Stateless P&L math over caller-supplied legs (no pricing lookup, no
+/// auth) — the frontend's strategy builder already has each leg's
+/// premium from a prior /api/v1/price call before it needs this.
+pub async fn post_payoff(Json(req): Json<PayoffRequest>) -> Result<Json<PayoffResponse>, StatusCode> {
+    if req.legs.is_empty() || req.hi_spot <= req.lo_spot || req.steps == 0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let points = combined_payoff_series(&req.legs, req.lo_spot, req.hi_spot, req.steps);
+    let net_premium = net_premium(&req.legs);
+    Ok(Json(PayoffResponse { points, net_premium }))
 }
 
 #[cfg(test)]
