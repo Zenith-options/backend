@@ -11,6 +11,7 @@ use tower_http::cors::{Any, CorsLayer};
 use axum::http::Method;
 
 mod db;
+mod models;
 
 // ─── Black-Scholes Pricing Engine ─────────────────────────────────────────────
 
