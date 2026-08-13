@@ -11,6 +11,7 @@ use tower_http::cors::{Any, CorsLayer};
 use axum::http::Method;
 
 mod auth;
+mod collateral;
 mod db;
 mod models;
 mod strkey;
