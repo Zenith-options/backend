@@ -10,6 +10,8 @@ use std::{f64::consts::PI, sync::Arc};
 use tower_http::cors::{Any, CorsLayer};
 use axum::http::Method;
 
+mod db;
+
 // ─── Black-Scholes Pricing Engine ─────────────────────────────────────────────
 
 /// Cumulative standard normal distribution (Abramowitz & Stegun approximation)
