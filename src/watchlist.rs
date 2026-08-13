@@ -1,4 +1,4 @@
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use serde::Deserialize;
@@ -47,4 +47,23 @@ pub async fn add_watchlist(
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(StatusCode::CREATED)
+}
+
+pub async fn remove_watchlist(
+    State(state): State<AppState>,
+    AuthUser(wallet_address): AuthUser,
+    Path(underlying): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+    let result = sqlx::query("DELETE FROM watchlist WHERE wallet_address = ? AND underlying = ?")
+        .bind(&wallet_address)
+        .bind(&underlying)
+        .execute(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if result.rows_affected() == 0 {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }

@@ -418,6 +418,7 @@ async fn main() {
             "/api/v1/watchlist",
             get(watchlist::get_watchlist).post(watchlist::add_watchlist),
         )
+        .route("/api/v1/watchlist/:underlying", axum::routing::delete(watchlist::remove_watchlist))
         .layer(cors)
         .with_state(state);
 
