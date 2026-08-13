@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::Json,
-    routing::{get, post},
+    routing::get,
     Router,
 };
 use serde::{Deserialize, Serialize};
@@ -184,6 +184,20 @@ pub struct PriceQuery {
     pub option_type: String,   // "call" | "put"
 }
 
+#[derive(Deserialize)]
+pub struct IvQuery {
+    pub underlying: String,
+    pub strike: f64,
+    pub expiry_days: f64,
+    pub option_type: String,   // "call" | "put"
+    pub market_price: f64,
+}
+
+#[derive(Serialize)]
+pub struct IvResult {
+    pub implied_vol: f64,
+}
+
 #[derive(Serialize)]
 pub struct OptionChainEntry {
     pub strike: f64,
@@ -299,6 +313,22 @@ async fn get_chain(
     Ok(Json(chain))
 }
 
+async fn get_implied_vol(
+    State(state): State<AppState>,
+    Query(q): Query<IvQuery>,
+) -> Result<Json<IvResult>, StatusCode> {
+    let prices = state.spot_prices.lock().unwrap();
+    let spot = *prices.get(&q.underlying).ok_or(StatusCode::NOT_FOUND)?;
+
+    let t = q.expiry_days / 365.0;
+    let is_call = q.option_type.to_lowercase() == "call";
+
+    let iv = implied_vol(q.market_price, spot, q.strike, t, 0.05, is_call)
+        .ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+
+    Ok(Json(IvResult { implied_vol: iv }))
+}
+
 async fn get_expiry_calendar(
     State(state): State<AppState>,
     Path(underlying): Path<String>,
@@ -354,6 +384,7 @@ async fn main() {
         .route("/health", get(health))
         .route("/api/v1/spot", get(get_spot))
         .route("/api/v1/price", get(price_option))
+        .route("/api/v1/iv", get(get_implied_vol))
         .route("/api/v1/chain", get(get_chain))
         .route("/api/v1/expiries/:underlying", get(get_expiry_calendar))
         .route("/api/v1/stats", get(get_protocol_stats))
@@ -364,4 +395,40 @@ async fn main() {
     println!("Zenith backend listening on {addr}");
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn smile_vol_at_the_money_equals_base() {
+        // At m=0 the skew/curvature terms vanish but the wing term doesn't
+        // (0.15^2 unconditionally), matching the frontend's shipped behavior.
+        let base = 0.82;
+        let v = smile_vol(base, 1.0);
+        assert!((v - (base + 0.12 * 0.15_f64.powi(2))).abs() < 1e-12);
+    }
+
+    #[test]
+    fn implied_vol_round_trips_through_black_scholes() {
+        let spot = 100.0;
+        let strike = 105.0;
+        let t = 30.0 / 365.0;
+        let r = 0.05;
+        let true_vol = 0.65;
+
+        let price = black_scholes(&BSInputs { spot, strike, vol: true_vol, t, r, is_call: true }).premium;
+        let recovered = implied_vol(price, spot, strike, t, r, true).unwrap();
+
+        assert!((recovered - true_vol).abs() < 1e-4);
+    }
+
+    #[test]
+    fn implied_vol_rejects_price_below_intrinsic() {
+        let spot = 100.0;
+        let strike = 80.0;
+        // Call intrinsic is 20; a market price below that is arbitrage-free-impossible.
+        assert!(implied_vol(10.0, spot, strike, 30.0 / 365.0, 0.05, true).is_none());
+    }
 }
