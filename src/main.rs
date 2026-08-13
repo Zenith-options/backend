@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::Json,
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use serde::{Deserialize, Serialize};
@@ -10,6 +10,7 @@ use std::{f64::consts::PI, sync::Arc};
 use tower_http::cors::{Any, CorsLayer};
 use axum::http::Method;
 
+mod auth;
 mod db;
 mod models;
 mod strkey;
@@ -399,6 +400,9 @@ async fn main() {
         .route("/api/v1/chain", get(get_chain))
         .route("/api/v1/expiries/:underlying", get(get_expiry_calendar))
         .route("/api/v1/stats", get(get_protocol_stats))
+        .route("/api/v1/auth/nonce", post(auth::post_nonce))
+        .route("/api/v1/auth/verify", post(auth::post_verify))
+        .route("/api/v1/auth/me", get(auth::get_me))
         .layer(cors)
         .with_state(state);
 
