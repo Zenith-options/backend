@@ -85,3 +85,39 @@ pub async fn delete_alert(
 
     Ok(StatusCode::NO_CONTENT)
 }
+
+/// Checks every untriggered alert against the current spot price for its
+/// underlying every 10 seconds and flips `triggered` once the condition is
+/// met. Alerts stay in the table (and visible via GET) after triggering —
+/// they just stop being re-checked — rather than being deleted, so the
+/// frontend can show "this alert fired" instead of it silently vanishing.
+pub async fn check_alerts_loop(state: AppState) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+    loop {
+        interval.tick().await;
+
+        let prices = state.spot_prices.lock().unwrap().clone();
+        for (underlying, spot) in prices {
+            let result = sqlx::query(
+                "UPDATE alerts
+                    SET triggered = 1, triggered_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE underlying = ? AND triggered = 0
+                   AND ((condition = 'above' AND target_price <= ?)
+                     OR (condition = 'below' AND target_price >= ?))",
+            )
+            .bind(&underlying)
+            .bind(spot)
+            .bind(spot)
+            .execute(&state.db)
+            .await;
+
+            match result {
+                Ok(r) if r.rows_affected() > 0 => {
+                    tracing::info!(underlying, spot, fired = r.rows_affected(), "alerts triggered");
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "alert check failed"),
+            }
+        }
+    }
+}
