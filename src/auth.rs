@@ -6,6 +6,7 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
+use crate::error::AppError;
 use crate::AppState;
 
 const NONCE_TTL_SECS: i64 = 5 * 60;
@@ -58,9 +59,9 @@ pub struct NonceResponse {
 pub async fn post_nonce(
     State(state): State<AppState>,
     Json(req): Json<NonceRequest>,
-) -> Result<Json<NonceResponse>, StatusCode> {
+) -> Result<Json<NonceResponse>, AppError> {
     if crate::strkey::decode_stellar_public_key(&req.wallet_address).is_err() {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(AppError::new(StatusCode::BAD_REQUEST, "wallet_address is not a valid Stellar G... address"));
     }
 
     let nonce = random_token_hex(16);
@@ -101,7 +102,7 @@ pub struct VerifyResponse {
 pub async fn post_verify(
     State(state): State<AppState>,
     Json(req): Json<VerifyRequest>,
-) -> Result<Json<VerifyResponse>, StatusCode> {
+) -> Result<Json<VerifyResponse>, AppError> {
     let row: Option<(String,)> = sqlx::query_as(
         "SELECT expires_at FROM auth_nonces WHERE nonce = ? AND wallet_address = ?",
     )
@@ -111,9 +112,11 @@ pub async fn post_verify(
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let (expires_at,) = row.ok_or(StatusCode::UNAUTHORIZED)?;
+    let (expires_at,) = row.ok_or_else(|| {
+        AppError::new(StatusCode::UNAUTHORIZED, "unknown or already-consumed nonce")
+    })?;
     if expires_at.as_str() < format_unix_secs(now_unix()).as_str() {
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(AppError::new(StatusCode::UNAUTHORIZED, "nonce expired"));
     }
 
     // Single-use: consume the nonce regardless of whether the signature
@@ -125,19 +128,21 @@ pub async fn post_verify(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let pubkey_bytes = crate::strkey::decode_stellar_public_key(&req.wallet_address)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    let verifying_key =
-        VerifyingKey::from_bytes(&pubkey_bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
+        .map_err(|_| AppError::new(StatusCode::BAD_REQUEST, "wallet_address is not a valid Stellar G... address"))?;
+    let verifying_key = VerifyingKey::from_bytes(&pubkey_bytes)
+        .map_err(|_| AppError::new(StatusCode::BAD_REQUEST, "wallet_address decodes to an invalid ed25519 key"))?;
 
     let sig_bytes = BASE64
         .decode(req.signature.as_bytes())
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    let sig_array: [u8; 64] = sig_bytes.try_into().map_err(|_| StatusCode::BAD_REQUEST)?;
+        .map_err(|_| AppError::new(StatusCode::BAD_REQUEST, "signature is not valid base64"))?;
+    let sig_array: [u8; 64] = sig_bytes
+        .try_into()
+        .map_err(|_| AppError::new(StatusCode::BAD_REQUEST, "signature must be exactly 64 bytes"))?;
     let signature = Signature::from_bytes(&sig_array);
 
     verifying_key
         .verify_strict(req.message.as_bytes(), &signature)
-        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+        .map_err(|_| AppError::new(StatusCode::UNAUTHORIZED, "signature does not verify against wallet_address for this message"))?;
 
     sqlx::query(
         "INSERT INTO accounts (wallet_address) VALUES (?) ON CONFLICT(wallet_address) DO NOTHING",
@@ -167,21 +172,21 @@ pub struct AuthUser(pub String);
 
 #[axum::async_trait]
 impl FromRequestParts<AppState> for AuthUser {
-    type Rejection = StatusCode;
+    type Rejection = AppError;
 
     async fn from_request_parts(
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        let unauthorized = || AppError::new(StatusCode::UNAUTHORIZED, "missing or invalid bearer token");
+
         let header = parts
             .headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
-            .ok_or(StatusCode::UNAUTHORIZED)?;
+            .ok_or_else(unauthorized)?;
 
-        let token = header
-            .strip_prefix("Bearer ")
-            .ok_or(StatusCode::UNAUTHORIZED)?;
+        let token = header.strip_prefix("Bearer ").ok_or_else(unauthorized)?;
 
         let row: Option<(String, String)> =
             sqlx::query_as("SELECT wallet_address, expires_at FROM sessions WHERE token = ?")
@@ -190,9 +195,9 @@ impl FromRequestParts<AppState> for AuthUser {
                 .await
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        let (wallet_address, expires_at) = row.ok_or(StatusCode::UNAUTHORIZED)?;
+        let (wallet_address, expires_at) = row.ok_or_else(unauthorized)?;
         if expires_at.as_str() < format_unix_secs(now_unix()).as_str() {
-            return Err(StatusCode::UNAUTHORIZED);
+            return Err(AppError::new(StatusCode::UNAUTHORIZED, "session expired"));
         }
 
         Ok(AuthUser(wallet_address))
