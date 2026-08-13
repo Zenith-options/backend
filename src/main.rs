@@ -408,6 +408,7 @@ async fn main() {
         .route("/api/v1/auth/me", get(auth::get_me))
         .route("/api/v1/account", get(positions::get_account))
         .route("/api/v1/positions", get(positions::list_positions))
+        .route("/api/v1/positions/open", post(positions::open_position))
         .layer(cors)
         .with_state(state);
 
