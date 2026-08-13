@@ -15,6 +15,7 @@ mod alerts;
 mod auth;
 mod collateral;
 mod db;
+mod error;
 mod history;
 mod models;
 mod payoff;
