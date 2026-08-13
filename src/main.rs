@@ -13,6 +13,7 @@ use axum::http::Method;
 mod auth;
 mod collateral;
 mod db;
+mod history;
 mod models;
 mod positions;
 mod strkey;
@@ -411,6 +412,7 @@ async fn main() {
         .route("/api/v1/positions/open", post(positions::open_position))
         .route("/api/v1/positions/:id/close", post(positions::close_position))
         .route("/api/v1/positions/:id/roll", post(positions::roll_position))
+        .route("/api/v1/history", get(history::get_history))
         .layer(cors)
         .with_state(state);
 

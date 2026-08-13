@@ -317,7 +317,16 @@ pub async fn roll_position(
 ) -> Result<Json<RollResult>, StatusCode> {
     let mut tx = state.db.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let closed = close_position_in_tx(&mut tx, &state, &wallet_address, &id).await?;
+    let mut closed = close_position_in_tx(&mut tx, &state, &wallet_address, &id).await?;
+    // close_position_in_tx always marks the row 'closed'; a roll is
+    // specifically a close-and-reopen, so relabel it 'rolled' to keep
+    // /api/v1/history's ledger distinguishable from a plain close.
+    sqlx::query("UPDATE positions SET status = 'rolled' WHERE id = ?")
+        .bind(&closed.id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    closed.status = "rolled".to_string();
 
     let open_req = OpenPositionRequest {
         underlying: closed.underlying.clone(),
