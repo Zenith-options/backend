@@ -424,6 +424,7 @@ async fn main() {
             "/api/v1/alerts",
             get(alerts::get_alerts).post(alerts::create_alert),
         )
+        .route("/api/v1/alerts/:id", axum::routing::delete(alerts::delete_alert))
         .layer(cors)
         .with_state(state);
 
