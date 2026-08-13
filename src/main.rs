@@ -397,6 +397,17 @@ async fn get_protocol_stats(State(state): State<AppState>) -> Json<serde_json::V
 
 #[tokio::main]
 async fn main() {
+    // Every tracing::info!/warn! call in this codebase (auth cleanup,
+    // alert checks, ...) was silently going nowhere without this — there
+    // was a tracing-subscriber dependency but nothing ever installed it
+    // as the global subscriber.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "zenith_backend=info,tower_http=info".into()),
+        )
+        .init();
+
     dotenvy::dotenv().ok();
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "sqlite://zenith.db".to_string());
