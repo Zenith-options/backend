@@ -262,13 +262,23 @@ pub struct SpotResponse {
 
 // ─── Route Handlers ───────────────────────────────────────────────────────────
 
-async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
+/// Pings the database as part of the health check — a load balancer or
+/// orchestrator should see this fail (and stop routing traffic here) if
+/// the pool is exhausted or the file's gone missing, not just get a
+/// hollow "ok" that only proves the HTTP server itself is up.
+async fn health(State(state): State<AppState>) -> Result<Json<serde_json::Value>, StatusCode> {
+    sqlx::query("SELECT 1")
+        .execute(&state.db)
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+
+    Ok(Json(serde_json::json!({
         "status": "ok",
         "service": "zenith-backend",
         "version": "0.1.0",
-        "network": "stellar-testnet"
-    }))
+        "network": "stellar-testnet",
+        "database": "ok"
+    })))
 }
 
 async fn get_spot(State(state): State<AppState>) -> Json<SpotResponse> {
