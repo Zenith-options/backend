@@ -386,6 +386,7 @@ async fn main() {
     let pool = db::init_pool(&database_url).await;
 
     let state = AppState::new(pool);
+    tokio::spawn(auth::cleanup_expired_loop(state.db.clone()));
 
     let cors = CorsLayer::new()
         .allow_origin(Any)

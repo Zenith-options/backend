@@ -202,3 +202,38 @@ impl FromRequestParts<AppState> for AuthUser {
 pub async fn get_me(auth: AuthUser) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "wallet_address": auth.0 }))
 }
+
+/// Sweeps expired nonces and sessions every 5 minutes. Neither table is
+/// large or hot enough to need anything fancier than a periodic DELETE;
+/// this just keeps them from growing forever.
+pub async fn cleanup_expired_loop(db: sqlx::SqlitePool) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
+    loop {
+        interval.tick().await;
+        let now = format_unix_secs(now_unix());
+
+        let nonces = sqlx::query("DELETE FROM auth_nonces WHERE expires_at < ?")
+            .bind(&now)
+            .execute(&db)
+            .await;
+        let sessions = sqlx::query("DELETE FROM sessions WHERE expires_at < ?")
+            .bind(&now)
+            .execute(&db)
+            .await;
+
+        match (nonces, sessions) {
+            (Ok(n), Ok(s)) => {
+                if n.rows_affected() > 0 || s.rows_affected() > 0 {
+                    tracing::info!(
+                        expired_nonces = n.rows_affected(),
+                        expired_sessions = s.rows_affected(),
+                        "swept expired auth rows"
+                    );
+                }
+            }
+            (Err(e), _) | (_, Err(e)) => {
+                tracing::warn!(error = %e, "auth cleanup sweep failed");
+            }
+        }
+    }
+}
