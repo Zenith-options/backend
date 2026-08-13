@@ -8,6 +8,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::{f64::consts::PI, sync::Arc};
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::trace::TraceLayer;
 use axum::http::Method;
 
 mod alerts;
@@ -404,7 +405,7 @@ async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "zenith_backend=info,tower_http=info".into()),
+                .unwrap_or_else(|_| "zenith_backend=info,tower_http=debug".into()),
         )
         .init();
 
@@ -454,6 +455,7 @@ async fn main() {
         .route("/api/v1/portfolio/payoff", post(payoff::post_payoff))
         .route("/api/v1/portfolio/greeks", get(positions::get_portfolio_greeks))
         .route("/api/v1/strategies/execute", post(strategies::execute_strategy))
+        .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state);
 
