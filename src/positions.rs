@@ -1,5 +1,5 @@
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Json;
 use serde::{Deserialize, Serialize};
 use sqlx::{Sqlite, Transaction};
@@ -48,11 +48,17 @@ pub struct ListPositionsQuery {
     pub offset: Option<i64>,
 }
 
+/// Response shape is still a bare JSON array (unchanged, since the
+/// frontend already consumes it that way) — total count and whether more
+/// pages exist ride along as `X-Total-Count`/`X-Has-More` response
+/// headers instead, the same pattern GitHub's API uses for exactly this
+/// reason: it lets pagination metadata arrive without breaking existing
+/// callers that expect the body to just be the list.
 pub async fn list_positions(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
     Query(q): Query<ListPositionsQuery>,
-) -> Result<Json<Vec<Position>>, AppError> {
+) -> Result<(HeaderMap, Json<Vec<Position>>), AppError> {
     let limit = q
         .limit
         .unwrap_or(DEFAULT_LIST_LIMIT)
@@ -80,7 +86,30 @@ pub async fn list_positions(
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(positions))
+    let total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM positions
+            WHERE wallet_address = ?
+              AND (? IS NULL OR status = ?)
+              AND (? IS NULL OR strategy_id = ?)",
+    )
+    .bind(&wallet_address)
+    .bind(&q.status)
+    .bind(&q.status)
+    .bind(&q.strategy_id)
+    .bind(&q.strategy_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let has_more = offset + (positions.len() as i64) < total;
+    let mut headers = HeaderMap::new();
+    headers.insert("x-total-count", HeaderValue::from(total));
+    headers.insert(
+        "x-has-more",
+        HeaderValue::from_static(if has_more { "true" } else { "false" }),
+    );
+
+    Ok((headers, Json(positions)))
 }
 
 #[derive(Deserialize)]

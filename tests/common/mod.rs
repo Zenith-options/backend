@@ -76,13 +76,18 @@ impl TestApp {
         self.get_with(path, None).await
     }
 
-    /// GET with an arbitrary extra header, returning response headers too.
+    /// GET with an optional bearer token and an arbitrary extra header,
+    /// returning response headers too.
     pub async fn get_raw(
         &self,
         path: &str,
+        token: Option<&str>,
         extra_header: Option<(&str, &str)>,
     ) -> (StatusCode, axum::http::HeaderMap, Value) {
         let mut builder = Request::builder().method("GET").uri(path);
+        if let Some(token) = token {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
         if let Some((name, value)) = extra_header {
             builder = builder.header(name, value);
         }

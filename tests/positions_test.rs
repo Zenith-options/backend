@@ -283,3 +283,34 @@ async fn list_positions_caps_an_excessive_limit() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(list.as_array().unwrap().len(), 0);
 }
+
+#[tokio::test]
+async fn list_positions_reports_total_count_and_has_more_via_headers() {
+    let app = TestApp::spawn().await;
+    let token = app.login().await;
+
+    for _ in 0..3 {
+        app.post_with(
+            "/api/v1/positions/open",
+            serde_json::json!({
+                "underlying": "BTC", "strike": 70000, "expiry_days": 30,
+                "option_type": "call", "position_type": "long", "contracts": 1
+            }),
+            Some(&token),
+        )
+        .await;
+    }
+
+    let (status, headers, _) = app
+        .get_raw("/api/v1/positions?limit=2", Some(&token), None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers.get("x-total-count").unwrap(), "3");
+    assert_eq!(headers.get("x-has-more").unwrap(), "true");
+
+    let (_, headers_last_page, _) = app
+        .get_raw("/api/v1/positions?limit=2&offset=2", Some(&token), None)
+        .await;
+    assert_eq!(headers_last_page.get("x-total-count").unwrap(), "3");
+    assert_eq!(headers_last_page.get("x-has-more").unwrap(), "false");
+}

@@ -6,7 +6,7 @@ use common::TestApp;
 #[tokio::test]
 async fn a_request_without_one_gets_a_fresh_request_id_assigned() {
     let app = TestApp::spawn().await;
-    let (status, headers, _) = app.get_raw("/health", None).await;
+    let (status, headers, _) = app.get_raw("/health", None, None).await;
     assert_eq!(status, StatusCode::OK);
 
     let id = headers
@@ -23,7 +23,7 @@ async fn a_request_without_one_gets_a_fresh_request_id_assigned() {
 async fn a_client_supplied_request_id_is_echoed_back_unchanged() {
     let app = TestApp::spawn().await;
     let (status, headers, _) = app
-        .get_raw("/health", Some(("x-request-id", "my-own-id-123")))
+        .get_raw("/health", None, Some(("x-request-id", "my-own-id-123")))
         .await;
     assert_eq!(status, StatusCode::OK);
 
@@ -34,8 +34,8 @@ async fn a_client_supplied_request_id_is_echoed_back_unchanged() {
 #[tokio::test]
 async fn two_separate_requests_get_different_ids() {
     let app = TestApp::spawn().await;
-    let (_, headers1, _) = app.get_raw("/health", None).await;
-    let (_, headers2, _) = app.get_raw("/health", None).await;
+    let (_, headers1, _) = app.get_raw("/health", None, None).await;
+    let (_, headers2, _) = app.get_raw("/health", None, None).await;
 
     let id1 = headers1.get("x-request-id").unwrap().to_str().unwrap();
     let id2 = headers2.get("x-request-id").unwrap().to_str().unwrap();
