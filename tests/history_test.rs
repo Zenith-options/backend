@@ -39,18 +39,24 @@ async fn history_trades_are_paginated_but_stats_cover_everything() {
     assert_eq!(page1["trades"].as_array().unwrap().len(), 2);
     // Stats reflect all 5 closed trades, not just the 2 returned on this page.
     assert_eq!(page1["stats"]["trade_count"].as_i64().unwrap(), 5);
+    assert!(page1["has_more"].as_bool().unwrap());
 
     let (_, page2) = app
         .get_with("/api/v1/history?limit=2&offset=2", Some(&token))
         .await;
     assert_eq!(page2["trades"].as_array().unwrap().len(), 2);
     assert_eq!(page2["stats"]["trade_count"].as_i64().unwrap(), 5);
+    assert!(page2["has_more"].as_bool().unwrap());
 
     let (_, page3) = app
         .get_with("/api/v1/history?limit=2&offset=4", Some(&token))
         .await;
     assert_eq!(page3["trades"].as_array().unwrap().len(), 1);
     assert_eq!(page3["stats"]["trade_count"].as_i64().unwrap(), 5);
+    assert!(
+        !page3["has_more"].as_bool().unwrap(),
+        "the last page must report has_more: false"
+    );
 
     let mut seen = std::collections::HashSet::new();
     for page in [&page1, &page2, &page3] {
@@ -78,4 +84,5 @@ async fn history_with_no_trades_has_zeroed_stats() {
         history["stats"]["total_realized_pnl"].as_f64().unwrap(),
         0.0
     );
+    assert!(!history["has_more"].as_bool().unwrap());
 }

@@ -27,6 +27,11 @@ pub struct HistoryStats {
 pub struct HistoryResponse {
     pub trades: Vec<Position>,
     pub stats: HistoryStats,
+    /// Whether requesting the next `offset` would return more trades.
+    /// `stats.trade_count` already IS the total across all pages, so
+    /// unlike list_positions this doesn't need a separate response
+    /// header — it's just another field on an already-object-shaped body.
+    pub has_more: bool,
 }
 
 /// The trade ledger is just closed/rolled rows from `positions` — there's
@@ -76,6 +81,7 @@ pub async fn get_history(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let has_more = offset + (trades.len() as i64) < trade_count;
     let stats = HistoryStats {
         trade_count,
         win_count,
@@ -83,5 +89,9 @@ pub async fn get_history(
         total_realized_pnl: total_realized_pnl.unwrap_or(0.0),
     };
 
-    Ok(Json(HistoryResponse { trades, stats }))
+    Ok(Json(HistoryResponse {
+        trades,
+        stats,
+        has_more,
+    }))
 }
