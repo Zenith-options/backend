@@ -10,10 +10,12 @@
 #![allow(dead_code)]
 
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use ed25519_dalek::{Signer, SigningKey};
 use rand::RngCore;
 use serde_json::Value;
+use std::net::SocketAddr;
 use tower::ServiceExt;
 
 pub struct TestApp {
@@ -39,7 +41,15 @@ impl TestApp {
         }
     }
 
-    async fn send(&self, req: Request<Body>) -> (StatusCode, Value) {
+    async fn send(&self, mut req: Request<Body>) -> (StatusCode, Value) {
+        // Calling the router directly (rather than through axum::serve)
+        // skips the connection layer that would normally populate this —
+        // SmartIpKeyExtractor's peer-IP fallback needs it present the same
+        // way a real TCP connection would provide it via
+        // into_make_service_with_connect_info.
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
+
         let response = self.router.clone().oneshot(req).await.unwrap();
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)

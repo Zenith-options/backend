@@ -528,20 +528,23 @@ pub async fn init_state() -> AppState {
 /// database without spawning the background loops or touching .env.
 /// The only two truly public, unauthenticated write endpoints — no login
 /// required to hit them at all, so unlike everything else they need a
-/// rate limit independent of any wallet's session. GlobalKeyExtractor
-/// (rather than per-IP) sidesteps needing ConnectInfo wired through
-/// axum::serve just for this, at the cost of one abusive client being
-/// able to exhaust the shared quota for everyone — an acceptable
-/// trade-off for a paper-trading demo, not something to ship as-is
-/// behind a real reverse proxy without switching to SmartIpKeyExtractor.
+/// rate limit independent of any wallet's session. SmartIpKeyExtractor
+/// gives each client its own quota (x-forwarded-for/x-real-ip/forwarded
+/// header first, falling back to the TCP peer address via ConnectInfo —
+/// wired up in main.rs's axum::serve call) instead of one shared quota
+/// that a single abusive client could exhaust for everyone. Trusting
+/// those headers assumes a reverse proxy that sets them correctly and
+/// strips any client-supplied ones sits in front of this in production;
+/// with no proxy, they simply won't be present and the peer-IP fallback
+/// takes over.
 fn auth_rate_limited_routes() -> Router<AppState> {
     use tower_governor::{
-        governor::GovernorConfigBuilder, key_extractor::GlobalKeyExtractor, GovernorLayer,
+        governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer,
     };
 
     let config = Arc::new(
         GovernorConfigBuilder::default()
-            .key_extractor(GlobalKeyExtractor)
+            .key_extractor(SmartIpKeyExtractor)
             .per_second(2)
             .burst_size(10)
             .finish()
