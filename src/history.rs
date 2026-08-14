@@ -1,10 +1,10 @@
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::AuthUser;
-use crate::error::AppError;
+use crate::error::{AppError, AppQuery};
 use crate::models::Position;
 use crate::positions::{DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT};
 use crate::AppState;
@@ -45,7 +45,7 @@ pub struct HistoryResponse {
 pub async fn get_history(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
-    Query(q): Query<HistoryQuery>,
+    AppQuery(q): AppQuery<HistoryQuery>,
 ) -> Result<Json<HistoryResponse>, AppError> {
     let limit = q
         .limit

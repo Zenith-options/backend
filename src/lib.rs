@@ -1,6 +1,6 @@
 use axum::http::Method;
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::StatusCode,
     response::Json,
     routing::{get, post},
@@ -27,6 +27,8 @@ pub mod request_id;
 pub mod strategies;
 pub mod strkey;
 pub mod watchlist;
+
+use error::AppQuery;
 
 // ─── Black-Scholes Pricing Engine ─────────────────────────────────────────────
 
@@ -352,7 +354,7 @@ async fn get_spot(State(state): State<AppState>) -> Json<SpotResponse> {
 
 async fn price_option(
     State(state): State<AppState>,
-    Query(q): Query<PriceQuery>,
+    AppQuery(q): AppQuery<PriceQuery>,
 ) -> Result<Json<BSResult>, StatusCode> {
     let prices = state.spot_prices.lock().unwrap();
     let vols = state.vol_surface.lock().unwrap();
@@ -377,7 +379,7 @@ async fn price_option(
 
 async fn get_chain(
     State(state): State<AppState>,
-    Query(q): Query<ChainQuery>,
+    AppQuery(q): AppQuery<ChainQuery>,
 ) -> Result<Json<Vec<OptionChainEntry>>, StatusCode> {
     let prices = state.spot_prices.lock().unwrap();
     let vols = state.vol_surface.lock().unwrap();
@@ -436,7 +438,7 @@ async fn get_chain(
 
 async fn get_implied_vol(
     State(state): State<AppState>,
-    Query(q): Query<IvQuery>,
+    AppQuery(q): AppQuery<IvQuery>,
 ) -> Result<Json<IvResult>, StatusCode> {
     let prices = state.spot_prices.lock().unwrap();
     let spot = *prices.get(&q.underlying).ok_or(StatusCode::NOT_FOUND)?;

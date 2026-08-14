@@ -1,4 +1,4 @@
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Json;
 use serde::{Deserialize, Serialize};
@@ -6,7 +6,7 @@ use sqlx::{Sqlite, Transaction};
 
 use crate::auth::AuthUser;
 use crate::collateral::collateral_required;
-use crate::error::AppError;
+use crate::error::{AppError, AppQuery};
 use crate::models::{Account, Position};
 use crate::{black_scholes, smile_vol, AppState, BSInputs};
 
@@ -57,7 +57,7 @@ pub struct ListPositionsQuery {
 pub async fn list_positions(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
-    Query(q): Query<ListPositionsQuery>,
+    AppQuery(q): AppQuery<ListPositionsQuery>,
 ) -> Result<(HeaderMap, Json<Vec<Position>>), AppError> {
     let limit = q
         .limit
