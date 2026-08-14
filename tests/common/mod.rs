@@ -1,0 +1,101 @@
+//! Shared harness for integration tests: spins up the real router
+//! (`build_router`) over a throwaway on-disk SQLite database, and offers
+//! thin request/response helpers so each test file can stay focused on
+//! what it's asserting instead of axum/tower plumbing.
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use ed25519_dalek::{Signer, SigningKey};
+use rand::RngCore;
+use serde_json::Value;
+use tower::ServiceExt;
+
+pub struct TestApp {
+    router: axum::Router,
+    db_path: std::path::PathBuf,
+}
+
+impl Drop for TestApp {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.db_path);
+    }
+}
+
+impl TestApp {
+    pub async fn spawn() -> Self {
+        let db_path = std::env::temp_dir().join(format!("zenith-test-{}.db", uuid::Uuid::new_v4()));
+        let database_url = format!("sqlite://{}", db_path.display());
+        let pool = zenith_backend::db::init_pool(&database_url).await;
+        let state = zenith_backend::AppState::new(pool);
+        Self { router: zenith_backend::build_router(state), db_path }
+    }
+
+    async fn send(&self, req: Request<Body>) -> (StatusCode, Value) {
+        let response = self.router.clone().oneshot(req).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = if bytes.is_empty() { Value::Null } else { serde_json::from_slice(&bytes).unwrap() };
+        (status, body)
+    }
+
+    pub async fn get(&self, path: &str) -> (StatusCode, Value) {
+        self.get_with(path, None).await
+    }
+
+    pub async fn get_with(&self, path: &str, token: Option<&str>) -> (StatusCode, Value) {
+        let mut builder = Request::builder().method("GET").uri(path);
+        if let Some(token) = token {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
+        self.send(builder.body(Body::empty()).unwrap()).await
+    }
+
+    pub async fn post(&self, path: &str, body: Value) -> (StatusCode, Value) {
+        self.post_with(path, body, None).await
+    }
+
+    pub async fn post_with(&self, path: &str, body: Value, token: Option<&str>) -> (StatusCode, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json");
+        if let Some(token) = token {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
+        self.send(builder.body(Body::from(body.to_string())).unwrap()).await
+    }
+
+    pub async fn delete_with(&self, path: &str, token: &str) -> (StatusCode, Value) {
+        let req = Request::builder()
+            .method("DELETE")
+            .uri(path)
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        self.send(req).await
+    }
+
+    /// Full sign-in-with-wallet flow for a fresh random keypair, returning
+    /// a bearer token ready to use in Authorization headers.
+    pub async fn login(&self) -> String {
+        let mut seed = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut seed);
+        let signing_key = SigningKey::from_bytes(&seed);
+        let address = zenith_backend::strkey::encode_stellar_public_key(signing_key.verifying_key().as_bytes());
+
+        let (_, nonce_resp) = self
+            .post("/api/v1/auth/nonce", serde_json::json!({ "wallet_address": address }))
+            .await;
+        let message = nonce_resp["message"].as_str().unwrap();
+        let signature = signing_key.sign(message.as_bytes());
+        let sig_b64 = data_encoding::BASE64.encode(&signature.to_bytes());
+
+        let (_, verify_resp) = self
+            .post(
+                "/api/v1/auth/verify",
+                serde_json::json!({ "wallet_address": address, "message": message, "signature": sig_b64 }),
+            )
+            .await;
+        verify_resp["token"].as_str().unwrap().to_string()
+    }
+}
