@@ -59,6 +59,10 @@ All `/api/v1/*` endpoints marked **auth** require an
 | `POST /api/v1/auth/verify` | Verify the signed message, get a 24h bearer session token |
 | `GET /api/v1/auth/me` **auth** | Confirm the current token's wallet address |
 
+Every `POST` below (positions open/close/roll, watchlist/alerts create,
+strategies/execute) is rate-limited per-IP (5/s, burst 20) on top of
+requiring a session — see `mutation_rate_limited_routes()` in `lib.rs`.
+
 ### Account & positions **auth**
 
 | Endpoint | What it does |
@@ -142,21 +146,20 @@ real theta-decay model.
 - `Dockerfile` and the CI workflow are not build/run-tested against a
   real Docker daemon or GitHub Actions runner from this environment —
   reviewed for correctness, not executed end-to-end.
-- Rate limiting still only covers the two unauthenticated auth
-  endpoints — now per-IP (`SmartIpKeyExtractor`, see the comment on
-  `auth_rate_limited_routes()` in `lib.rs`) rather than a single global
-  quota, but every other endpoint (positions, strategies, alerts, …)
-  is still unlimited per wallet.
-- `list_positions`/`get_history` cap pagination at `MAX_LIST_LIMIT`
-  (200) but neither returns a total count or `has_more` — a client has
-  to keep paging until it gets back fewer than `limit` rows to know
-  it's reached the end.
+- Rate limiting is per-IP, not per-wallet — a shared IP (NAT, VPN,
+  corporate network) means every wallet behind it shares one quota.
+  Acceptable for a paper-trading demo; a real deployment would want a
+  second limiter keyed on the session token for authenticated routes.
 
 Previously listed here and since addressed: the three background loops
 (auth cleanup, alert checks, price simulator) now have direct unit
-tests against their extracted per-tick logic rather than only being
-exercised implicitly through the HTTP surface; the auth rate limiter
-moved off a global quota (see above).
+tests against their extracted per-tick logic; the rate limiter moved
+off a single global quota to per-IP (`SmartIpKeyExtractor`) and now
+covers every mutating endpoint (positions, watchlist, alerts,
+strategies), not just the two auth ones; `list_positions`/`get_history`
+now report total count and whether more pages exist
+(`x-total-count`/`x-has-more` headers on positions, a `has_more` field
+on history) instead of leaving a paging client to guess.
 
 ## License
 
