@@ -163,7 +163,13 @@ one (positions, watchlist, alerts, strategies), so wallets sharing an
 IP no longer share a quota; `list_positions`/`get_history` now report
 total count and whether more pages exist (`x-total-count`/`x-has-more`
 headers on positions, a `has_more` field on history) instead of
-leaving a paging client to guess.
+leaving a paging client to guess; malformed query params and JSON
+bodies now return the same `{"error": "..."}` shape as every other
+failure instead of axum's plain-text rejections (`AppQuery`/`AppJson`
+in `error.rs`); and every remaining unexpected-DB-failure path across
+the whole app now names the specific operation that failed
+(`db_error()` in `error.rs`) instead of a bare "Internal Server Error"
+with no other detail.
 
 ## License
 
