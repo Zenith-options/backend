@@ -84,3 +84,57 @@ async fn two_logins_get_different_tokens() {
     let token2 = app.login().await;
     assert_ne!(token1, token2);
 }
+
+#[tokio::test]
+async fn verify_rejects_a_signature_from_the_wrong_keypair() {
+    use data_encoding::BASE64;
+    use ed25519_dalek::{Signer, SigningKey};
+    use rand::RngCore;
+
+    let app = TestApp::spawn().await;
+
+    let mut real_seed = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut real_seed);
+    let real_key = SigningKey::from_bytes(&real_seed);
+    let address =
+        zenith_backend::strkey::encode_stellar_public_key(real_key.verifying_key().as_bytes());
+
+    let (_, nonce_resp) = app
+        .post(
+            "/api/v1/auth/nonce",
+            serde_json::json!({ "wallet_address": address }),
+        )
+        .await;
+    let message = nonce_resp["message"].as_str().unwrap().to_string();
+
+    // Sign with a DIFFERENT keypair than the one `address` actually
+    // decodes to — a valid, well-formed ed25519 signature, just not one
+    // that proves control of this wallet.
+    let mut wrong_seed = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut wrong_seed);
+    let wrong_key = SigningKey::from_bytes(&wrong_seed);
+    let bad_signature = wrong_key.sign(message.as_bytes());
+    let bad_sig_b64 = BASE64.encode(&bad_signature.to_bytes());
+
+    let (status, body) = app
+        .post(
+            "/api/v1/auth/verify",
+            serde_json::json!({ "wallet_address": address, "message": message, "signature": bad_sig_b64 }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(body["error"].as_str().unwrap().contains("does not verify"));
+
+    // The nonce is still consumed on the failed attempt (single-use
+    // regardless of outcome), so retrying with the SAME nonce — even with
+    // the right key this time — must not succeed either.
+    let real_signature = real_key.sign(message.as_bytes());
+    let real_sig_b64 = BASE64.encode(&real_signature.to_bytes());
+    let (retry_status, _) = app
+        .post(
+            "/api/v1/auth/verify",
+            serde_json::json!({ "wallet_address": address, "message": message, "signature": real_sig_b64 }),
+        )
+        .await;
+    assert_eq!(retry_status, StatusCode::UNAUTHORIZED);
+}
