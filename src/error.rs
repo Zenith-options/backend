@@ -1,5 +1,5 @@
-use axum::extract::rejection::QueryRejection;
-use axum::extract::{FromRequestParts, Query};
+use axum::extract::rejection::{JsonRejection, QueryRejection};
+use axum::extract::{FromRequest, FromRequestParts, Query, Request};
 use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
@@ -63,5 +63,32 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let Query(value) = Query::<T>::from_request_parts(parts, state).await?;
         Ok(AppQuery(value))
+    }
+}
+
+impl From<JsonRejection> for AppError {
+    fn from(rejection: JsonRejection) -> Self {
+        AppError::new(rejection.status(), rejection.body_text())
+    }
+}
+
+/// Drop-in replacement for `axum::extract::Json<T>` whose rejection is a
+/// JSON `{"error": "..."}` body via AppError, instead of axum's default
+/// plain-text rejection (e.g. "Failed to deserialize the JSON body into
+/// the target type: ..."). Every `Json<T>` request-body extractor in the
+/// app should use this instead.
+pub struct AppJson<T>(pub T);
+
+#[axum::async_trait]
+impl<S, T> FromRequest<S> for AppJson<T>
+where
+    T: DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let Json(value) = Json::<T>::from_request(req, state).await?;
+        Ok(AppJson(value))
     }
 }

@@ -6,7 +6,7 @@ use sqlx::{Sqlite, Transaction};
 
 use crate::auth::AuthUser;
 use crate::collateral::collateral_required;
-use crate::error::{AppError, AppQuery};
+use crate::error::{AppError, AppJson, AppQuery};
 use crate::models::{Account, Position};
 use crate::{black_scholes, smile_vol, AppState, BSInputs};
 
@@ -252,7 +252,7 @@ pub(crate) async fn open_position_in_tx(
 pub async fn open_position(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
-    Json(req): Json<OpenPositionRequest>,
+    AppJson(req): AppJson<OpenPositionRequest>,
 ) -> Result<Json<Position>, AppError> {
     let mut tx = state
         .db
@@ -411,7 +411,7 @@ pub async fn roll_position(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
     Path(id): Path<String>,
-    Json(req): Json<RollPositionRequest>,
+    AppJson(req): AppJson<RollPositionRequest>,
 ) -> Result<Json<RollResult>, AppError> {
     let mut tx = state
         .db

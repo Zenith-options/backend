@@ -4,7 +4,7 @@ use axum::response::Json;
 use serde::Deserialize;
 
 use crate::auth::AuthUser;
-use crate::error::AppError;
+use crate::error::{AppError, AppJson};
 use crate::models::Position;
 use crate::positions::{open_position_in_tx, OpenPositionRequest};
 use crate::AppState;
@@ -21,7 +21,7 @@ pub struct ExecuteStrategyRequest {
 pub async fn execute_strategy(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
-    Json(req): Json<ExecuteStrategyRequest>,
+    AppJson(req): AppJson<ExecuteStrategyRequest>,
 ) -> Result<Json<Vec<Position>>, AppError> {
     if req.legs.len() < 2 {
         // A single "strategy" leg is just a plain open — use

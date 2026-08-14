@@ -4,7 +4,7 @@ use axum::response::Json;
 use serde::Deserialize;
 
 use crate::auth::AuthUser;
-use crate::error::AppError;
+use crate::error::{AppError, AppJson};
 use crate::models::WatchlistItem;
 use crate::AppState;
 
@@ -30,7 +30,7 @@ pub struct AddWatchlistRequest {
 pub async fn add_watchlist(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
-    Json(req): Json<AddWatchlistRequest>,
+    AppJson(req): AppJson<AddWatchlistRequest>,
 ) -> Result<StatusCode, AppError> {
     if !state
         .spot_prices

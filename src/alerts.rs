@@ -4,7 +4,7 @@ use axum::response::Json;
 use serde::Deserialize;
 
 use crate::auth::AuthUser;
-use crate::error::AppError;
+use crate::error::{AppError, AppJson};
 use crate::models::Alert;
 use crate::AppState;
 
@@ -32,7 +32,7 @@ pub struct CreateAlertRequest {
 pub async fn create_alert(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
-    Json(req): Json<CreateAlertRequest>,
+    AppJson(req): AppJson<CreateAlertRequest>,
 ) -> Result<Json<Alert>, AppError> {
     if req.condition != "above" && req.condition != "below" {
         return Err(AppError::new(

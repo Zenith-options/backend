@@ -6,7 +6,7 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
-use crate::error::AppError;
+use crate::error::{AppError, AppJson};
 use crate::AppState;
 
 const NONCE_TTL_SECS: i64 = 5 * 60;
@@ -58,7 +58,7 @@ pub struct NonceResponse {
 
 pub async fn post_nonce(
     State(state): State<AppState>,
-    Json(req): Json<NonceRequest>,
+    AppJson(req): AppJson<NonceRequest>,
 ) -> Result<Json<NonceResponse>, AppError> {
     if crate::strkey::decode_stellar_public_key(&req.wallet_address).is_err() {
         return Err(AppError::new(
@@ -104,7 +104,7 @@ pub struct VerifyResponse {
 
 pub async fn post_verify(
     State(state): State<AppState>,
-    Json(req): Json<VerifyRequest>,
+    AppJson(req): AppJson<VerifyRequest>,
 ) -> Result<Json<VerifyResponse>, AppError> {
     let row: Option<(String,)> =
         sqlx::query_as("SELECT expires_at FROM auth_nonces WHERE nonce = ? AND wallet_address = ?")
