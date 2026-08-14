@@ -22,6 +22,7 @@ pub mod models;
 pub mod payoff;
 pub mod positions;
 pub mod prices;
+pub mod rate_limit_key;
 pub mod request_id;
 pub mod strategies;
 pub mod strkey;
@@ -560,18 +561,21 @@ fn auth_rate_limited_routes() -> Router<AppState> {
 }
 
 /// Every write endpoint that mutates trading/account state, behind a more
-/// generous per-IP quota than the auth endpoints (these require a valid
-/// session, so abuse here is bounded by needing wallets in the first
-/// place — but a single compromised or careless client still shouldn't
-/// be able to hammer the DB with unlimited opens/closes/rolls).
+/// generous quota than the auth endpoints (these require a valid session,
+/// so abuse here is bounded by needing wallets in the first place — but a
+/// single compromised or careless client still shouldn't be able to
+/// hammer the DB with unlimited opens/closes/rolls). Keyed per-wallet
+/// (via BearerOrIpKeyExtractor) rather than per-IP like the auth routes:
+/// every route here already requires a session token, and keying on IP
+/// alone would mean wallets sharing a NAT/VPN/corporate network split one
+/// quota instead of each getting their own.
 fn mutation_rate_limited_routes() -> Router<AppState> {
-    use tower_governor::{
-        governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer,
-    };
+    use crate::rate_limit_key::BearerOrIpKeyExtractor;
+    use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 
     let config = Arc::new(
         GovernorConfigBuilder::default()
-            .key_extractor(SmartIpKeyExtractor)
+            .key_extractor(BearerOrIpKeyExtractor)
             .per_second(5)
             .burst_size(20)
             .finish()
