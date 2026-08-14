@@ -7,8 +7,14 @@ async fn main() {
     let addr = "0.0.0.0:8081";
     println!("Zenith backend listening on {addr}");
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app)
-        .with_graceful_shutdown(zenith_backend::shutdown_signal())
-        .await
-        .unwrap();
+    // Needed for SmartIpKeyExtractor's peer-IP fallback (used when no
+    // x-forwarded-for/x-real-ip/forwarded header is present) to have a
+    // real socket address to read, rather than nothing at all.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(zenith_backend::shutdown_signal())
+    .await
+    .unwrap();
 }

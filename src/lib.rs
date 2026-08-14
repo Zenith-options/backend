@@ -1,6 +1,6 @@
 use axum::http::Method;
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::StatusCode,
     response::Json,
     routing::{get, post},
@@ -9,6 +9,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::{f64::consts::PI, sync::Arc};
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::request_id::{PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 
 pub mod alerts;
@@ -21,9 +22,13 @@ pub mod models;
 pub mod payoff;
 pub mod positions;
 pub mod prices;
+pub mod rate_limit_key;
+pub mod request_id;
 pub mod strategies;
 pub mod strkey;
 pub mod watchlist;
+
+use error::AppQuery;
 
 // ─── Black-Scholes Pricing Engine ─────────────────────────────────────────────
 
@@ -326,11 +331,14 @@ pub struct SpotResponse {
 /// orchestrator should see this fail (and stop routing traffic here) if
 /// the pool is exhausted or the file's gone missing, not just get a
 /// hollow "ok" that only proves the HTTP server itself is up.
-async fn health(State(state): State<AppState>) -> Result<Json<serde_json::Value>, StatusCode> {
+async fn health(State(state): State<AppState>) -> Result<Json<serde_json::Value>, error::AppError> {
     sqlx::query("SELECT 1")
         .execute(&state.db)
         .await
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "health check: database unavailable");
+            error::AppError::new(StatusCode::SERVICE_UNAVAILABLE, "database unavailable")
+        })?;
 
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -349,7 +357,7 @@ async fn get_spot(State(state): State<AppState>) -> Json<SpotResponse> {
 
 async fn price_option(
     State(state): State<AppState>,
-    Query(q): Query<PriceQuery>,
+    AppQuery(q): AppQuery<PriceQuery>,
 ) -> Result<Json<BSResult>, StatusCode> {
     let prices = state.spot_prices.lock().unwrap();
     let vols = state.vol_surface.lock().unwrap();
@@ -374,7 +382,7 @@ async fn price_option(
 
 async fn get_chain(
     State(state): State<AppState>,
-    Query(q): Query<ChainQuery>,
+    AppQuery(q): AppQuery<ChainQuery>,
 ) -> Result<Json<Vec<OptionChainEntry>>, StatusCode> {
     let prices = state.spot_prices.lock().unwrap();
     let vols = state.vol_surface.lock().unwrap();
@@ -433,7 +441,7 @@ async fn get_chain(
 
 async fn get_implied_vol(
     State(state): State<AppState>,
-    Query(q): Query<IvQuery>,
+    AppQuery(q): AppQuery<IvQuery>,
 ) -> Result<Json<IvResult>, StatusCode> {
     let prices = state.spot_prices.lock().unwrap();
     let spot = *prices.get(&q.underlying).ok_or(StatusCode::NOT_FOUND)?;
@@ -528,20 +536,23 @@ pub async fn init_state() -> AppState {
 /// database without spawning the background loops or touching .env.
 /// The only two truly public, unauthenticated write endpoints — no login
 /// required to hit them at all, so unlike everything else they need a
-/// rate limit independent of any wallet's session. GlobalKeyExtractor
-/// (rather than per-IP) sidesteps needing ConnectInfo wired through
-/// axum::serve just for this, at the cost of one abusive client being
-/// able to exhaust the shared quota for everyone — an acceptable
-/// trade-off for a paper-trading demo, not something to ship as-is
-/// behind a real reverse proxy without switching to SmartIpKeyExtractor.
+/// rate limit independent of any wallet's session. SmartIpKeyExtractor
+/// gives each client its own quota (x-forwarded-for/x-real-ip/forwarded
+/// header first, falling back to the TCP peer address via ConnectInfo —
+/// wired up in main.rs's axum::serve call) instead of one shared quota
+/// that a single abusive client could exhaust for everyone. Trusting
+/// those headers assumes a reverse proxy that sets them correctly and
+/// strips any client-supplied ones sits in front of this in production;
+/// with no proxy, they simply won't be present and the peer-IP fallback
+/// takes over.
 fn auth_rate_limited_routes() -> Router<AppState> {
     use tower_governor::{
-        governor::GovernorConfigBuilder, key_extractor::GlobalKeyExtractor, GovernorLayer,
+        governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer,
     };
 
     let config = Arc::new(
         GovernorConfigBuilder::default()
-            .key_extractor(GlobalKeyExtractor)
+            .key_extractor(SmartIpKeyExtractor)
             .per_second(2)
             .burst_size(10)
             .finish()
@@ -552,6 +563,48 @@ fn auth_rate_limited_routes() -> Router<AppState> {
         .route("/api/v1/auth/nonce", post(auth::post_nonce))
         .route("/api/v1/auth/verify", post(auth::post_verify))
         .layer(GovernorLayer { config })
+}
+
+/// Every write endpoint that mutates trading/account state, behind a more
+/// generous quota than the auth endpoints (these require a valid session,
+/// so abuse here is bounded by needing wallets in the first place — but a
+/// single compromised or careless client still shouldn't be able to
+/// hammer the DB with unlimited opens/closes/rolls). Keyed per-wallet
+/// (via BearerOrIpKeyExtractor) rather than per-IP like the auth routes:
+/// every route here already requires a session token, and keying on IP
+/// alone would mean wallets sharing a NAT/VPN/corporate network split one
+/// quota instead of each getting their own.
+fn mutation_rate_limited_routes() -> Router<AppState> {
+    use crate::rate_limit_key::BearerOrIpKeyExtractor;
+    use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
+
+    let config = Arc::new(
+        GovernorConfigBuilder::default()
+            .key_extractor(BearerOrIpKeyExtractor)
+            .per_second(5)
+            .burst_size(20)
+            .finish()
+            .expect("rate limiter config"),
+    );
+
+    Router::new()
+        .route("/api/v1/positions/open", post(positions::open_position))
+        .route(
+            "/api/v1/positions/:id/close",
+            post(positions::close_position),
+        )
+        .route("/api/v1/positions/:id/roll", post(positions::roll_position))
+        .route("/api/v1/watchlist", post(watchlist::add_watchlist))
+        .route("/api/v1/alerts", post(alerts::create_alert))
+        .route(
+            "/api/v1/strategies/execute",
+            post(strategies::execute_strategy),
+        )
+        .layer(GovernorLayer { config })
+}
+
+fn request_id_header() -> axum::http::HeaderName {
+    axum::http::HeaderName::from_static("x-request-id")
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -569,28 +622,17 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/expiries/:underlying", get(get_expiry_calendar))
         .route("/api/v1/stats", get(get_protocol_stats))
         .merge(auth_rate_limited_routes())
+        .merge(mutation_rate_limited_routes())
         .route("/api/v1/auth/me", get(auth::get_me))
         .route("/api/v1/account", get(positions::get_account))
         .route("/api/v1/positions", get(positions::list_positions))
-        .route("/api/v1/positions/open", post(positions::open_position))
-        .route(
-            "/api/v1/positions/:id/close",
-            post(positions::close_position),
-        )
-        .route("/api/v1/positions/:id/roll", post(positions::roll_position))
         .route("/api/v1/history", get(history::get_history))
-        .route(
-            "/api/v1/watchlist",
-            get(watchlist::get_watchlist).post(watchlist::add_watchlist),
-        )
+        .route("/api/v1/watchlist", get(watchlist::get_watchlist))
         .route(
             "/api/v1/watchlist/:underlying",
             axum::routing::delete(watchlist::remove_watchlist),
         )
-        .route(
-            "/api/v1/alerts",
-            get(alerts::get_alerts).post(alerts::create_alert),
-        )
+        .route("/api/v1/alerts", get(alerts::get_alerts))
         .route(
             "/api/v1/alerts/:id",
             axum::routing::delete(alerts::delete_alert),
@@ -601,11 +643,12 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/portfolio/greeks",
             get(positions::get_portfolio_greeks),
         )
-        .route(
-            "/api/v1/strategies/execute",
-            post(strategies::execute_strategy),
-        )
+        .layer(PropagateRequestIdLayer::new(request_id_header()))
         .layer(TraceLayer::new_for_http())
+        .layer(SetRequestIdLayer::new(
+            request_id_header(),
+            request_id::MakeRequestUuid,
+        ))
         .layer(cors)
         .with_state(state)
 }

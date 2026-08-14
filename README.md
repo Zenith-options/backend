@@ -59,16 +59,20 @@ All `/api/v1/*` endpoints marked **auth** require an
 | `POST /api/v1/auth/verify` | Verify the signed message, get a 24h bearer session token |
 | `GET /api/v1/auth/me` **auth** | Confirm the current token's wallet address |
 
+Every `POST` below (positions open/close/roll, watchlist/alerts create,
+strategies/execute) is rate-limited per-IP (5/s, burst 20) on top of
+requiring a session — see `mutation_rate_limited_routes()` in `lib.rs`.
+
 ### Account & positions **auth**
 
 | Endpoint | What it does |
 |---|---|
 | `GET /api/v1/account` | Balance + locked collateral |
-| `GET /api/v1/positions` | List positions (`?status=`, `?strategy_id=` filters) |
+| `GET /api/v1/positions` | List positions (`?status=`, `?strategy_id=`, `?limit=`, `?offset=`) |
 | `POST /api/v1/positions/open` | Price and open one position |
 | `POST /api/v1/positions/:id/close` | Settle an open position at current spot/vol |
 | `POST /api/v1/positions/:id/roll` | Close + reopen at a new strike/expiry, atomically |
-| `GET /api/v1/history` | Closed/rolled positions + win/loss/pnl stats |
+| `GET /api/v1/history` | Closed/rolled positions + win/loss/pnl stats (`?limit=`, `?offset=` — stats always cover the full history, not just the returned page) |
 | `GET /api/v1/portfolio/greeks` | Aggregate Greeks across all open positions, repriced live |
 | `POST /api/v1/strategies/execute` | Open 2+ legs atomically under one shared `strategy_id` |
 
@@ -84,6 +88,10 @@ All `/api/v1/*` endpoints marked **auth** require an
 Alerts are checked against spot every 10s by a background task; a
 triggered alert stays in the table (visible via GET) rather than being
 deleted.
+
+Every response carries an `x-request-id` header — a fresh UUIDv4 if the
+request didn't already have one, or the caller's own value echoed back
+unchanged otherwise — for tracing a single request through logs.
 
 ## Architecture
 
@@ -101,6 +109,7 @@ src/
 ├── positions.rs      # Account/position/roll/greeks handlers + the open/close tx helpers
 ├── strategies.rs     # Multi-leg atomic execution, built on positions.rs's tx helpers
 ├── history.rs         # Closed/rolled positions + stats
+├── request_id.rs      # UUIDv4 generator for the x-request-id middleware
 ├── watchlist.rs, alerts.rs, prices.rs  # Per-domain CRUD + background loops
 migrations/           # One file per schema change, embedded into the binary at compile time
 tests/
@@ -134,16 +143,37 @@ real theta-decay model.
   a random-walk simulator, not sourced from anywhere real.
 - No on-chain / Soroban integration — this is pure off-chain paper
   trading.
-- Rate limiting only covers the two unauthenticated auth endpoints, and
-  uses a global (not per-IP) quota — see the comment on
-  `auth_rate_limited_routes()` in `lib.rs` for the trade-off and what a
-  real deployment behind a reverse proxy would want instead.
-- The background loops (auth cleanup, alert checks, price simulator)
-  have no tests — integration tests only exercise the HTTP surface, not
-  loops that were never spawned in the test harness.
 - `Dockerfile` and the CI workflow are not build/run-tested against a
   real Docker daemon or GitHub Actions runner from this environment —
   reviewed for correctness, not executed end-to-end.
+- The mutation rate limiter's bearer-token fallback (for requests with
+  no token at all) keys on peer IP only, without replicating
+  SmartIpKeyExtractor's x-forwarded-for/x-real-ip/forwarded header
+  chain — acceptable since that fallback path is only reached by
+  requests that fail AuthUser's own check regardless, but it does mean
+  that one specific path isn't proxy-aware the way the auth endpoints'
+  limiter is.
+
+Previously listed here and since addressed: the three background loops
+(auth cleanup, alert checks, price simulator) now have direct unit
+tests against their extracted per-tick logic; the rate limiter moved
+off a single global quota to per-IP (`SmartIpKeyExtractor`) on the auth
+endpoints and per-wallet (`BearerOrIpKeyExtractor`) on every mutating
+one (positions, watchlist, alerts, strategies), so wallets sharing an
+IP no longer share a quota; `list_positions`/`get_history` now report
+total count and whether more pages exist (`x-total-count`/`x-has-more`
+headers on positions, a `has_more` field on history) instead of
+leaving a paging client to guess; malformed query params and JSON
+bodies now return the same `{"error": "..."}` shape as every other
+failure instead of axum's plain-text rejections (`AppQuery`/`AppJson`
+in `error.rs`); every remaining unexpected-DB-failure path across the
+whole app now names the specific operation that failed (`db_error()`
+in `error.rs`) instead of a bare "Internal Server Error" with no other
+detail; and cross-wallet ownership on close/roll (a stranger 404s
+trying to close or roll another wallet's position, same as it already
+did for deleting someone else's alert/watchlist entry) and
+roll_position's replacement-leg validation are now actually tested
+rather than just assumed from reading the SQL.
 
 ## License
 

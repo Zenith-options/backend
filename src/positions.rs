@@ -1,12 +1,12 @@
-use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::extract::{Path, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Json;
 use serde::{Deserialize, Serialize};
 use sqlx::{Sqlite, Transaction};
 
 use crate::auth::AuthUser;
 use crate::collateral::collateral_required;
-use crate::error::AppError;
+use crate::error::{db_error, AppError, AppJson, AppQuery};
 use crate::models::{Account, Position};
 use crate::{black_scholes, smile_vol, AppState, BSInputs};
 
@@ -22,16 +22,19 @@ pub async fn get_account(
     .bind(&wallet_address)
     .execute(&state.db)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| db_error("create or confirm account", e))?;
 
     let account: Account = sqlx::query_as("SELECT * FROM accounts WHERE wallet_address = ?")
         .bind(&wallet_address)
         .fetch_one(&state.db)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("load account", e))?;
 
     Ok(Json(account))
 }
+
+pub const DEFAULT_LIST_LIMIT: i64 = 50;
+pub const MAX_LIST_LIMIT: i64 = 200;
 
 #[derive(Deserialize)]
 pub struct ListPositionsQuery {
@@ -39,13 +42,29 @@ pub struct ListPositionsQuery {
     pub status: Option<String>,
     /// Restrict to the legs of one multi-leg strategy — omit for everything.
     pub strategy_id: Option<String>,
+    /// Defaults to DEFAULT_LIST_LIMIT, capped at MAX_LIST_LIMIT regardless
+    /// of what the caller asks for.
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
 }
 
+/// Response shape is still a bare JSON array (unchanged, since the
+/// frontend already consumes it that way) — total count and whether more
+/// pages exist ride along as `X-Total-Count`/`X-Has-More` response
+/// headers instead, the same pattern GitHub's API uses for exactly this
+/// reason: it lets pagination metadata arrive without breaking existing
+/// callers that expect the body to just be the list.
 pub async fn list_positions(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
-    Query(q): Query<ListPositionsQuery>,
-) -> Result<Json<Vec<Position>>, AppError> {
+    AppQuery(q): AppQuery<ListPositionsQuery>,
+) -> Result<(HeaderMap, Json<Vec<Position>>), AppError> {
+    let limit = q
+        .limit
+        .unwrap_or(DEFAULT_LIST_LIMIT)
+        .clamp(1, MAX_LIST_LIMIT);
+    let offset = q.offset.unwrap_or(0).max(0);
+
     // `? IS NULL OR column = ?` lets one query handle all four
     // status/strategy_id filter combinations without branching SQL.
     let positions: Vec<Position> = sqlx::query_as(
@@ -53,18 +72,44 @@ pub async fn list_positions(
             WHERE wallet_address = ?
               AND (? IS NULL OR status = ?)
               AND (? IS NULL OR strategy_id = ?)
-         ORDER BY opened_at DESC",
+         ORDER BY opened_at DESC
+         LIMIT ? OFFSET ?",
     )
     .bind(&wallet_address)
     .bind(&q.status)
     .bind(&q.status)
     .bind(&q.strategy_id)
     .bind(&q.strategy_id)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&state.db)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| db_error("list positions", e))?;
 
-    Ok(Json(positions))
+    let total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM positions
+            WHERE wallet_address = ?
+              AND (? IS NULL OR status = ?)
+              AND (? IS NULL OR strategy_id = ?)",
+    )
+    .bind(&wallet_address)
+    .bind(&q.status)
+    .bind(&q.status)
+    .bind(&q.strategy_id)
+    .bind(&q.strategy_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| db_error("count positions", e))?;
+
+    let has_more = offset + (positions.len() as i64) < total;
+    let mut headers = HeaderMap::new();
+    headers.insert("x-total-count", HeaderValue::from(total));
+    headers.insert(
+        "x-has-more",
+        HeaderValue::from_static(if has_more { "true" } else { "false" }),
+    );
+
+    Ok((headers, Json(positions)))
 }
 
 #[derive(Deserialize)]
@@ -150,7 +195,7 @@ pub(crate) async fn open_position_in_tx(
         .bind(wallet_address)
         .fetch_one(&mut **tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("load account", e))?;
 
     let new_balance = account.balance + cash_delta;
     let new_collateral_locked = account.collateral_locked + collateral;
@@ -170,7 +215,7 @@ pub(crate) async fn open_position_in_tx(
         .bind(wallet_address)
         .execute(&mut **tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("update account balance", e))?;
 
     let id = uuid::Uuid::new_v4().to_string();
     sqlx::query(
@@ -193,13 +238,13 @@ pub(crate) async fn open_position_in_tx(
     .bind(strategy_id)
     .execute(&mut **tx)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| db_error("insert position", e))?;
 
     let position: Position = sqlx::query_as("SELECT * FROM positions WHERE id = ?")
         .bind(&id)
         .fetch_one(&mut **tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("load the position just opened", e))?;
 
     Ok(position)
 }
@@ -207,17 +252,17 @@ pub(crate) async fn open_position_in_tx(
 pub async fn open_position(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
-    Json(req): Json<OpenPositionRequest>,
+    AppJson(req): AppJson<OpenPositionRequest>,
 ) -> Result<Json<Position>, AppError> {
     let mut tx = state
         .db
         .begin()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("begin open-position transaction", e))?;
     let position = open_position_in_tx(&mut tx, &state, &wallet_address, &req, None).await?;
     tx.commit()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("commit open-position transaction", e))?;
     Ok(Json(position))
 }
 
@@ -243,7 +288,7 @@ async fn close_position_in_tx(
     .bind(wallet_address)
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|e| db_error("look up position", e))?
     .ok_or_else(|| {
         AppError::new(
             StatusCode::NOT_FOUND,
@@ -294,7 +339,7 @@ async fn close_position_in_tx(
         .bind(wallet_address)
         .fetch_one(&mut **tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("load account", e))?;
 
     let new_balance = account.balance + cash_delta;
     let new_collateral_locked = account.collateral_locked - position.collateral;
@@ -305,7 +350,7 @@ async fn close_position_in_tx(
         .bind(wallet_address)
         .execute(&mut **tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("update account balance", e))?;
 
     sqlx::query(
         "UPDATE positions
@@ -319,13 +364,13 @@ async fn close_position_in_tx(
     .bind(position_id)
     .execute(&mut **tx)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| db_error("mark position closed", e))?;
 
     let closed: Position = sqlx::query_as("SELECT * FROM positions WHERE id = ?")
         .bind(position_id)
         .fetch_one(&mut **tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("load the position just closed", e))?;
 
     Ok(closed)
 }
@@ -339,11 +384,11 @@ pub async fn close_position(
         .db
         .begin()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("begin close-position transaction", e))?;
     let closed = close_position_in_tx(&mut tx, &state, &wallet_address, &id).await?;
     tx.commit()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("commit close-position transaction", e))?;
     Ok(Json(closed))
 }
 
@@ -366,13 +411,13 @@ pub async fn roll_position(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
     Path(id): Path<String>,
-    Json(req): Json<RollPositionRequest>,
+    AppJson(req): AppJson<RollPositionRequest>,
 ) -> Result<Json<RollResult>, AppError> {
     let mut tx = state
         .db
         .begin()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("begin roll transaction", e))?;
 
     let mut closed = close_position_in_tx(&mut tx, &state, &wallet_address, &id).await?;
     // close_position_in_tx always marks the row 'closed'; a roll is
@@ -382,7 +427,7 @@ pub async fn roll_position(
         .bind(&closed.id)
         .execute(&mut *tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("mark position rolled", e))?;
     closed.status = "rolled".to_string();
 
     let open_req = OpenPositionRequest {
@@ -406,7 +451,7 @@ pub async fn roll_position(
 
     tx.commit()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("commit roll transaction", e))?;
     Ok(Json(RollResult { closed, opened }))
 }
 
@@ -430,7 +475,7 @@ pub async fn get_portfolio_greeks(
             .bind(&wallet_address)
             .fetch_all(&state.db)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|e| db_error("load open positions for greeks", e))?;
 
     let mut totals = AggregateGreeks::default();
     for p in &open_positions {
@@ -467,4 +512,53 @@ pub async fn get_portfolio_greeks(
     }
 
     Ok(Json(totals))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Not reachable through the HTTP API at all (nothing lets a caller
+    /// delist an underlying), so this calls get_portfolio_greeks directly
+    /// as a plain function rather than through TestApp/the router — the
+    /// only way to actually exercise the `continue` branch this test is
+    /// aimed at.
+    #[tokio::test]
+    async fn get_portfolio_greeks_skips_a_position_in_a_delisted_underlying() {
+        let db_path =
+            std::env::temp_dir().join(format!("zenith-positions-test-{}.db", uuid::Uuid::new_v4()));
+        let pool = crate::db::init_pool(&format!("sqlite://{}", db_path.display())).await;
+        let state = AppState::new(pool);
+
+        sqlx::query("INSERT INTO accounts (wallet_address) VALUES ('GTEST')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO positions
+                (id, wallet_address, underlying, strike, expiry_days, option_type,
+                 position_type, contracts, entry_premium, entry_spot, status)
+             VALUES ('p1', 'GTEST', 'RETIRED', 100, 30, 'call', 'long', 1, 5, 100, 'open')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        // Never listed in spot_prices/vol_surface at all — same situation
+        // as an underlying that existed when the position opened and was
+        // delisted since.
+        assert!(!state.spot_prices.lock().unwrap().contains_key("RETIRED"));
+
+        let greeks = get_portfolio_greeks(State(state.clone()), AuthUser("GTEST".into()))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(greeks.delta, 0.0);
+        assert_eq!(greeks.gamma, 0.0);
+        assert_eq!(greeks.theta, 0.0);
+        assert_eq!(greeks.vega, 0.0);
+
+        state.db.close().await;
+        let _ = std::fs::remove_file(&db_path);
+    }
 }

@@ -10,10 +10,12 @@
 #![allow(dead_code)]
 
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use ed25519_dalek::{Signer, SigningKey};
 use rand::RngCore;
 use serde_json::Value;
+use std::net::SocketAddr;
 use tower::ServiceExt;
 
 pub struct TestApp {
@@ -40,21 +42,61 @@ impl TestApp {
     }
 
     async fn send(&self, req: Request<Body>) -> (StatusCode, Value) {
+        let (status, _headers, body) = self.send_raw(req).await;
+        (status, body)
+    }
+
+    /// Like `send`, but also returns response headers — for tests that
+    /// need to assert on something other than status/body (e.g.
+    /// x-request-id propagation).
+    async fn send_raw(&self, mut req: Request<Body>) -> (StatusCode, axum::http::HeaderMap, Value) {
+        // Calling the router directly (rather than through axum::serve)
+        // skips the connection layer that would normally populate this —
+        // SmartIpKeyExtractor's peer-IP fallback needs it present the same
+        // way a real TCP connection would provide it via
+        // into_make_service_with_connect_info.
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
+
         let response = self.router.clone().oneshot(req).await.unwrap();
         let status = response.status();
+        let headers = response.headers().clone();
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
         let body = if bytes.is_empty() {
             Value::Null
         } else {
-            serde_json::from_slice(&bytes).unwrap()
+            // Not every response is JSON-bodied — tower_governor's 429s are
+            // plain text ("Too Many Requests! Wait for Ns"). Fall back to
+            // the raw text as a JSON string rather than unwrapping, so
+            // tests that only care about `status` don't panic on those.
+            serde_json::from_slice(&bytes)
+                .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()))
         };
-        (status, body)
+        (status, headers, body)
     }
 
     pub async fn get(&self, path: &str) -> (StatusCode, Value) {
         self.get_with(path, None).await
+    }
+
+    /// GET with an optional bearer token and an arbitrary extra header,
+    /// returning response headers too.
+    pub async fn get_raw(
+        &self,
+        path: &str,
+        token: Option<&str>,
+        extra_header: Option<(&str, &str)>,
+    ) -> (StatusCode, axum::http::HeaderMap, Value) {
+        let mut builder = Request::builder().method("GET").uri(path);
+        if let Some(token) = token {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
+        if let Some((name, value)) = extra_header {
+            builder = builder.header(name, value);
+        }
+        self.send_raw(builder.body(Body::empty()).unwrap()).await
     }
 
     pub async fn get_with(&self, path: &str, token: Option<&str>) -> (StatusCode, Value) {
