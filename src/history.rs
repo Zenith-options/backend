@@ -1,10 +1,9 @@
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::response::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::AuthUser;
-use crate::error::{AppError, AppQuery};
+use crate::error::{db_error, AppError, AppQuery};
 use crate::models::Position;
 use crate::positions::{DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT};
 use crate::AppState;
@@ -64,7 +63,7 @@ pub async fn get_history(
     .bind(offset)
     .fetch_all(&state.db)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| db_error("load trade history", e))?;
 
     let (trade_count, win_count, loss_count, total_realized_pnl): (i64, i64, i64, Option<f64>) =
         sqlx::query_as(
@@ -79,7 +78,7 @@ pub async fn get_history(
         .bind(&wallet_address)
         .fetch_one(&state.db)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("compute trade history stats", e))?;
 
     let has_more = offset + (trades.len() as i64) < trade_count;
     let stats = HistoryStats {

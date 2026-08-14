@@ -4,7 +4,7 @@ use axum::response::Json;
 use serde::Deserialize;
 
 use crate::auth::AuthUser;
-use crate::error::{AppError, AppJson};
+use crate::error::{db_error, AppError, AppJson};
 use crate::models::WatchlistItem;
 use crate::AppState;
 
@@ -17,7 +17,7 @@ pub async fn get_watchlist(
             .bind(&wallet_address)
             .fetch_all(&state.db)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|e| db_error("load watchlist", e))?;
 
     Ok(Json(items))
 }
@@ -52,7 +52,7 @@ pub async fn add_watchlist(
     .bind(&req.underlying)
     .execute(&state.db)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| db_error("add watchlist item", e))?;
 
     Ok(StatusCode::CREATED)
 }
@@ -67,7 +67,7 @@ pub async fn remove_watchlist(
         .bind(&underlying)
         .execute(&state.db)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("remove watchlist item", e))?;
 
     if result.rows_affected() == 0 {
         return Err(AppError::new(

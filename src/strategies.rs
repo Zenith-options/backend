@@ -4,7 +4,7 @@ use axum::response::Json;
 use serde::Deserialize;
 
 use crate::auth::AuthUser;
-use crate::error::{AppError, AppJson};
+use crate::error::{db_error, AppError, AppJson};
 use crate::models::Position;
 use crate::positions::{open_position_in_tx, OpenPositionRequest};
 use crate::AppState;
@@ -37,7 +37,7 @@ pub async fn execute_strategy(
         .db
         .begin()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("begin strategy transaction", e))?;
 
     let mut opened = Vec::with_capacity(req.legs.len());
     for leg in &req.legs {
@@ -48,6 +48,6 @@ pub async fn execute_strategy(
 
     tx.commit()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("commit strategy transaction", e))?;
     Ok(Json(opened))
 }

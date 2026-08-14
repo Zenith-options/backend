@@ -331,11 +331,14 @@ pub struct SpotResponse {
 /// orchestrator should see this fail (and stop routing traffic here) if
 /// the pool is exhausted or the file's gone missing, not just get a
 /// hollow "ok" that only proves the HTTP server itself is up.
-async fn health(State(state): State<AppState>) -> Result<Json<serde_json::Value>, StatusCode> {
+async fn health(State(state): State<AppState>) -> Result<Json<serde_json::Value>, error::AppError> {
     sqlx::query("SELECT 1")
         .execute(&state.db)
         .await
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "health check: database unavailable");
+            error::AppError::new(StatusCode::SERVICE_UNAVAILABLE, "database unavailable")
+        })?;
 
     Ok(Json(serde_json::json!({
         "status": "ok",
