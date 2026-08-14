@@ -64,11 +64,11 @@ All `/api/v1/*` endpoints marked **auth** require an
 | Endpoint | What it does |
 |---|---|
 | `GET /api/v1/account` | Balance + locked collateral |
-| `GET /api/v1/positions` | List positions (`?status=`, `?strategy_id=` filters) |
+| `GET /api/v1/positions` | List positions (`?status=`, `?strategy_id=`, `?limit=`, `?offset=`) |
 | `POST /api/v1/positions/open` | Price and open one position |
 | `POST /api/v1/positions/:id/close` | Settle an open position at current spot/vol |
 | `POST /api/v1/positions/:id/roll` | Close + reopen at a new strike/expiry, atomically |
-| `GET /api/v1/history` | Closed/rolled positions + win/loss/pnl stats |
+| `GET /api/v1/history` | Closed/rolled positions + win/loss/pnl stats (`?limit=`, `?offset=` — stats always cover the full history, not just the returned page) |
 | `GET /api/v1/portfolio/greeks` | Aggregate Greeks across all open positions, repriced live |
 | `POST /api/v1/strategies/execute` | Open 2+ legs atomically under one shared `strategy_id` |
 
@@ -84,6 +84,10 @@ All `/api/v1/*` endpoints marked **auth** require an
 Alerts are checked against spot every 10s by a background task; a
 triggered alert stays in the table (visible via GET) rather than being
 deleted.
+
+Every response carries an `x-request-id` header — a fresh UUIDv4 if the
+request didn't already have one, or the caller's own value echoed back
+unchanged otherwise — for tracing a single request through logs.
 
 ## Architecture
 
@@ -101,6 +105,7 @@ src/
 ├── positions.rs      # Account/position/roll/greeks handlers + the open/close tx helpers
 ├── strategies.rs     # Multi-leg atomic execution, built on positions.rs's tx helpers
 ├── history.rs         # Closed/rolled positions + stats
+├── request_id.rs      # UUIDv4 generator for the x-request-id middleware
 ├── watchlist.rs, alerts.rs, prices.rs  # Per-domain CRUD + background loops
 migrations/           # One file per schema change, embedded into the binary at compile time
 tests/
@@ -134,16 +139,24 @@ real theta-decay model.
   a random-walk simulator, not sourced from anywhere real.
 - No on-chain / Soroban integration — this is pure off-chain paper
   trading.
-- Rate limiting only covers the two unauthenticated auth endpoints, and
-  uses a global (not per-IP) quota — see the comment on
-  `auth_rate_limited_routes()` in `lib.rs` for the trade-off and what a
-  real deployment behind a reverse proxy would want instead.
-- The background loops (auth cleanup, alert checks, price simulator)
-  have no tests — integration tests only exercise the HTTP surface, not
-  loops that were never spawned in the test harness.
 - `Dockerfile` and the CI workflow are not build/run-tested against a
   real Docker daemon or GitHub Actions runner from this environment —
   reviewed for correctness, not executed end-to-end.
+- Rate limiting still only covers the two unauthenticated auth
+  endpoints — now per-IP (`SmartIpKeyExtractor`, see the comment on
+  `auth_rate_limited_routes()` in `lib.rs`) rather than a single global
+  quota, but every other endpoint (positions, strategies, alerts, …)
+  is still unlimited per wallet.
+- `list_positions`/`get_history` cap pagination at `MAX_LIST_LIMIT`
+  (200) but neither returns a total count or `has_more` — a client has
+  to keep paging until it gets back fewer than `limit` rows to know
+  it's reached the end.
+
+Previously listed here and since addressed: the three background loops
+(auth cleanup, alert checks, price simulator) now have direct unit
+tests against their extracted per-tick logic rather than only being
+exercised implicitly through the HTTP surface; the auth rate limiter
+moved off a global quota (see above).
 
 ## License
 
