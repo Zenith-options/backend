@@ -193,6 +193,7 @@ pub async fn post_verify(
 /// Extractor for routes that require a logged-in wallet. Reads
 /// `Authorization: Bearer <token>`, looks it up in `sessions`, and
 /// rejects with 401 if missing, unknown, or expired.
+#[derive(Debug)]
 pub struct AuthUser(pub String);
 
 #[axum::async_trait]
@@ -370,6 +371,43 @@ mod tests {
         assert_eq!(expired_sessions, 0);
 
         db.close().await;
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    /// Not reachable through the integration test harness at all — the
+    /// real SESSION_TTL_SECS is 24 hours and nothing in this app lets a
+    /// caller fast-forward the system clock, so the only way to actually
+    /// exercise this specific rejection (found, but expired — distinct
+    /// from "garbage/unknown token" in tests/auth_test.rs) is to insert an
+    /// already-expired session directly and call the extractor as a plain
+    /// function, bypassing the router entirely.
+    #[tokio::test]
+    async fn auth_user_rejects_a_session_that_has_expired() {
+        let (db, db_path) = test_db().await;
+        let state = crate::AppState::new(db);
+
+        sqlx::query("INSERT INTO accounts (wallet_address) VALUES ('GTEST')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let past = format_unix_secs(now_unix() - 3600);
+        sqlx::query("INSERT INTO sessions (token, wallet_address, expires_at) VALUES ('tok123', 'GTEST', ?)")
+            .bind(&past)
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        let req = axum::http::Request::builder()
+            .header("authorization", "Bearer tok123")
+            .body(())
+            .unwrap();
+        let (mut parts, _) = req.into_parts();
+
+        let result = AuthUser::from_request_parts(&mut parts, &state).await;
+        let err = result.expect_err("an expired session must not authenticate");
+        assert_eq!(err.message, "session expired");
+
+        state.db.close().await;
         let _ = std::fs::remove_file(&db_path);
     }
 }
