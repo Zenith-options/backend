@@ -166,10 +166,14 @@ headers on positions, a `has_more` field on history) instead of
 leaving a paging client to guess; malformed query params and JSON
 bodies now return the same `{"error": "..."}` shape as every other
 failure instead of axum's plain-text rejections (`AppQuery`/`AppJson`
-in `error.rs`); and every remaining unexpected-DB-failure path across
-the whole app now names the specific operation that failed
-(`db_error()` in `error.rs`) instead of a bare "Internal Server Error"
-with no other detail.
+in `error.rs`); every remaining unexpected-DB-failure path across the
+whole app now names the specific operation that failed (`db_error()`
+in `error.rs`) instead of a bare "Internal Server Error" with no other
+detail; and cross-wallet ownership on close/roll (a stranger 404s
+trying to close or roll another wallet's position, same as it already
+did for deleting someone else's alert/watchlist entry) and
+roll_position's replacement-leg validation are now actually tested
+rather than just assumed from reading the SQL.
 
 ## License
 
