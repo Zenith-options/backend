@@ -234,6 +234,27 @@ pub async fn get_me(auth: AuthUser) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "wallet_address": auth.0 }))
 }
 
+/// Deletes every expired nonce/session row as of now. Returns
+/// (expired_nonces, expired_sessions) removed, or an sqlx error from
+/// whichever DELETE ran into one — pulled out of the loop below so it has
+/// a return value the loop can log and tests can assert on directly,
+/// instead of only being observable through log lines or side effects on
+/// a live timer.
+pub async fn sweep_expired(db: &sqlx::SqlitePool) -> Result<(u64, u64), sqlx::Error> {
+    let now = format_unix_secs(now_unix());
+
+    let nonces = sqlx::query("DELETE FROM auth_nonces WHERE expires_at < ?")
+        .bind(&now)
+        .execute(db)
+        .await?;
+    let sessions = sqlx::query("DELETE FROM sessions WHERE expires_at < ?")
+        .bind(&now)
+        .execute(db)
+        .await?;
+
+    Ok((nonces.rows_affected(), sessions.rows_affected()))
+}
+
 /// Sweeps expired nonces and sessions every 5 minutes. Neither table is
 /// large or hot enough to need anything fancier than a periodic DELETE;
 /// this just keeps them from growing forever.
@@ -241,30 +262,101 @@ pub async fn cleanup_expired_loop(db: sqlx::SqlitePool) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
     loop {
         interval.tick().await;
-        let now = format_unix_secs(now_unix());
 
-        let nonces = sqlx::query("DELETE FROM auth_nonces WHERE expires_at < ?")
-            .bind(&now)
-            .execute(&db)
-            .await;
-        let sessions = sqlx::query("DELETE FROM sessions WHERE expires_at < ?")
-            .bind(&now)
-            .execute(&db)
-            .await;
-
-        match (nonces, sessions) {
-            (Ok(n), Ok(s)) => {
-                if n.rows_affected() > 0 || s.rows_affected() > 0 {
-                    tracing::info!(
-                        expired_nonces = n.rows_affected(),
-                        expired_sessions = s.rows_affected(),
-                        "swept expired auth rows"
-                    );
-                }
+        match sweep_expired(&db).await {
+            Ok((n, s)) if n > 0 || s > 0 => {
+                tracing::info!(expired_nonces = n, expired_sessions = s, "swept expired auth rows");
             }
-            (Err(e), _) | (_, Err(e)) => {
+            Ok(_) => {}
+            Err(e) => {
                 tracing::warn!(error = %e, "auth cleanup sweep failed");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn test_db() -> (sqlx::SqlitePool, std::path::PathBuf) {
+        let db_path = std::env::temp_dir().join(format!("zenith-auth-test-{}.db", uuid::Uuid::new_v4()));
+        let pool = crate::db::init_pool(&format!("sqlite://{}", db_path.display())).await;
+        (pool, db_path)
+    }
+
+    #[tokio::test]
+    async fn sweep_expired_removes_only_expired_rows() {
+        let (db, db_path) = test_db().await;
+
+        let past = format_unix_secs(now_unix() - 3600);
+        let future = format_unix_secs(now_unix() + 3600);
+
+        sqlx::query("INSERT INTO auth_nonces (nonce, wallet_address, expires_at) VALUES (?, 'GTEST', ?)")
+            .bind("expired-nonce")
+            .bind(&past)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO auth_nonces (nonce, wallet_address, expires_at) VALUES (?, 'GTEST', ?)")
+            .bind("live-nonce")
+            .bind(&future)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        sqlx::query("INSERT INTO accounts (wallet_address) VALUES ('GTEST')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sessions (token, wallet_address, expires_at) VALUES (?, 'GTEST', ?)")
+            .bind("expired-session")
+            .bind(&past)
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sessions (token, wallet_address, expires_at) VALUES (?, 'GTEST', ?)")
+            .bind("live-session")
+            .bind(&future)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let (expired_nonces, expired_sessions) = sweep_expired(&db).await.unwrap();
+        assert_eq!(expired_nonces, 1);
+        assert_eq!(expired_sessions, 1);
+
+        let remaining_nonces: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM auth_nonces")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        let remaining_sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(remaining_nonces, 1);
+        assert_eq!(remaining_sessions, 1);
+
+        db.close().await;
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[tokio::test]
+    async fn sweep_expired_is_a_no_op_when_nothing_has_expired() {
+        let (db, db_path) = test_db().await;
+
+        let future = format_unix_secs(now_unix() + 3600);
+        sqlx::query("INSERT INTO auth_nonces (nonce, wallet_address, expires_at) VALUES ('live', 'GTEST', ?)")
+            .bind(&future)
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let (expired_nonces, expired_sessions) = sweep_expired(&db).await.unwrap();
+        assert_eq!(expired_nonces, 0);
+        assert_eq!(expired_sessions, 0);
+
+        db.close().await;
+        let _ = std::fs::remove_file(&db_path);
     }
 }
