@@ -438,6 +438,32 @@ pub async fn init_state() -> AppState {
 /// Builds the full route table over a given AppState. Split out from
 /// `init_state` so tests can build a router over a throwaway in-memory
 /// database without spawning the background loops or touching .env.
+/// The only two truly public, unauthenticated write endpoints — no login
+/// required to hit them at all, so unlike everything else they need a
+/// rate limit independent of any wallet's session. GlobalKeyExtractor
+/// (rather than per-IP) sidesteps needing ConnectInfo wired through
+/// axum::serve just for this, at the cost of one abusive client being
+/// able to exhaust the shared quota for everyone — an acceptable
+/// trade-off for a paper-trading demo, not something to ship as-is
+/// behind a real reverse proxy without switching to SmartIpKeyExtractor.
+fn auth_rate_limited_routes() -> Router<AppState> {
+    use tower_governor::{governor::GovernorConfigBuilder, key_extractor::GlobalKeyExtractor, GovernorLayer};
+
+    let config = Arc::new(
+        GovernorConfigBuilder::default()
+            .key_extractor(GlobalKeyExtractor)
+            .per_second(2)
+            .burst_size(10)
+            .finish()
+            .expect("rate limiter config"),
+    );
+
+    Router::new()
+        .route("/api/v1/auth/nonce", post(auth::post_nonce))
+        .route("/api/v1/auth/verify", post(auth::post_verify))
+        .layer(GovernorLayer { config })
+}
+
 pub fn build_router(state: AppState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -452,8 +478,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/chain", get(get_chain))
         .route("/api/v1/expiries/:underlying", get(get_expiry_calendar))
         .route("/api/v1/stats", get(get_protocol_stats))
-        .route("/api/v1/auth/nonce", post(auth::post_nonce))
-        .route("/api/v1/auth/verify", post(auth::post_verify))
+        .merge(auth_rate_limited_routes())
         .route("/api/v1/auth/me", get(auth::get_me))
         .route("/api/v1/account", get(positions::get_account))
         .route("/api/v1/positions", get(positions::list_positions))
