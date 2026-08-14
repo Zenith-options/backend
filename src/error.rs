@@ -105,3 +105,26 @@ where
         Ok(AppJson(value))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn db_error_names_the_operation_without_leaking_the_raw_sqlx_error() {
+        let raw = sqlx::Error::RowNotFound;
+        let app_err = db_error("load account", raw);
+
+        assert_eq!(app_err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(app_err.message, "failed to load account");
+        // The whole point: the client-facing message must not be a
+        // passthrough of sqlx's own Display text ("no rows returned").
+        assert!(!app_err.message.contains("row"));
+    }
+
+    #[test]
+    fn app_error_from_status_code_uses_the_canonical_reason() {
+        let app_err: AppError = StatusCode::NOT_FOUND.into();
+        assert_eq!(app_err.message, "Not Found");
+    }
+}
