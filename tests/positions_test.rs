@@ -352,3 +352,78 @@ async fn roll_rejects_a_non_positive_new_strike() {
         .await;
     assert_eq!(still_open.as_array().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn closing_someone_elses_position_404s() {
+    let app = TestApp::spawn().await;
+    let owner = app.login().await;
+    let stranger = app.login().await;
+
+    let (_, opened) = app
+        .post_with(
+            "/api/v1/positions/open",
+            serde_json::json!({
+                "underlying": "BTC", "strike": 70000, "expiry_days": 30,
+                "option_type": "call", "position_type": "long", "contracts": 1
+            }),
+            Some(&owner),
+        )
+        .await;
+    let id = opened["id"].as_str().unwrap();
+
+    let (status, _) = app
+        .post_with(
+            &format!("/api/v1/positions/{id}/close"),
+            serde_json::Value::Null,
+            Some(&stranger),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a wallet must not be able to close another wallet's position"
+    );
+
+    // Still open under the actual owner, untouched by the stranger's attempt.
+    let (_, owner_positions) = app.get_with("/api/v1/positions", Some(&owner)).await;
+    assert_eq!(owner_positions[0]["status"].as_str().unwrap(), "open");
+}
+
+#[tokio::test]
+async fn rolling_someone_elses_position_404s() {
+    let app = TestApp::spawn().await;
+    let owner = app.login().await;
+    let stranger = app.login().await;
+
+    let (_, opened) = app
+        .post_with(
+            "/api/v1/positions/open",
+            serde_json::json!({
+                "underlying": "XLM", "strike": 0.13, "expiry_days": 30,
+                "option_type": "call", "position_type": "short", "contracts": 100
+            }),
+            Some(&owner),
+        )
+        .await;
+    let id = opened["id"].as_str().unwrap();
+
+    let (status, _) = app
+        .post_with(
+            &format!("/api/v1/positions/{id}/roll"),
+            serde_json::json!({ "new_strike": 0.14, "new_expiry_days": 60 }),
+            Some(&stranger),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a wallet must not be able to roll another wallet's position"
+    );
+
+    let (_, owner_positions) = app.get_with("/api/v1/positions", Some(&owner)).await;
+    assert_eq!(
+        owner_positions.as_array().unwrap().len(),
+        1,
+        "the stranger's failed roll must not have opened a replacement leg either"
+    );
+}
