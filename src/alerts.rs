@@ -104,42 +104,128 @@ pub async fn delete_alert(
 }
 
 /// Checks every untriggered alert against the current spot price for its
-/// underlying every 10 seconds and flips `triggered` once the condition is
-/// met. Alerts stay in the table (and visible via GET) after triggering —
-/// they just stop being re-checked — rather than being deleted, so the
-/// frontend can show "this alert fired" instead of it silently vanishing.
+/// underlying and flips `triggered` once the condition is met. Returns the
+/// total number of alerts fired across every underlying this pass —
+/// pulled out of the loop below so a test can assert on it directly
+/// instead of only through log lines on a live 10-second timer.
+pub async fn check_once(state: &AppState) -> u64 {
+    let prices = state.spot_prices.lock().unwrap().clone();
+    let mut total_fired = 0;
+    for (underlying, spot) in prices {
+        let result = sqlx::query(
+            "UPDATE alerts
+                SET triggered = 1, triggered_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE underlying = ? AND triggered = 0
+               AND ((condition = 'above' AND target_price <= ?)
+                 OR (condition = 'below' AND target_price >= ?))",
+        )
+        .bind(&underlying)
+        .bind(spot)
+        .bind(spot)
+        .execute(&state.db)
+        .await;
+
+        match result {
+            Ok(r) if r.rows_affected() > 0 => {
+                tracing::info!(underlying, spot, fired = r.rows_affected(), "alerts triggered");
+                total_fired += r.rows_affected();
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "alert check failed"),
+        }
+    }
+    total_fired
+}
+
+/// Alerts stay in the table (and visible via GET) after triggering — they
+/// just stop being re-checked — rather than being deleted, so the frontend
+/// can show "this alert fired" instead of it silently vanishing.
 pub async fn check_alerts_loop(state: AppState) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
     loop {
         interval.tick().await;
+        check_once(&state).await;
+    }
+}
 
-        let prices = state.spot_prices.lock().unwrap().clone();
-        for (underlying, spot) in prices {
-            let result = sqlx::query(
-                "UPDATE alerts
-                    SET triggered = 1, triggered_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                 WHERE underlying = ? AND triggered = 0
-                   AND ((condition = 'above' AND target_price <= ?)
-                     OR (condition = 'below' AND target_price >= ?))",
-            )
-            .bind(&underlying)
-            .bind(spot)
-            .bind(spot)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn test_state() -> (AppState, std::path::PathBuf) {
+        let db_path = std::env::temp_dir().join(format!("zenith-alerts-test-{}.db", uuid::Uuid::new_v4()));
+        let pool = crate::db::init_pool(&format!("sqlite://{}", db_path.display())).await;
+        (AppState::new(pool), db_path)
+    }
+
+    async fn insert_alert(state: &AppState, id: &str, underlying: &str, condition: &str, target: f64) {
+        sqlx::query("INSERT INTO accounts (wallet_address) VALUES ('GTEST') ON CONFLICT DO NOTHING")
             .execute(&state.db)
-            .await;
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO alerts (id, wallet_address, underlying, condition, target_price)
+             VALUES (?, 'GTEST', ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(underlying)
+        .bind(condition)
+        .bind(target)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
 
-            match result {
-                Ok(r) if r.rows_affected() > 0 => {
-                    tracing::info!(
-                        underlying,
-                        spot,
-                        fired = r.rows_affected(),
-                        "alerts triggered"
-                    );
-                }
-                Ok(_) => {}
-                Err(e) => tracing::warn!(error = %e, "alert check failed"),
-            }
-        }
+    #[tokio::test]
+    async fn check_once_fires_an_alert_whose_condition_is_met() {
+        let (state, db_path) = test_state().await;
+        state.spot_prices.lock().unwrap().insert("BTC".into(), 70_000.0);
+        insert_alert(&state, "a1", "BTC", "above", 65_000.0).await;
+
+        let fired = check_once(&state).await;
+        assert_eq!(fired, 1);
+
+        let triggered: bool = sqlx::query_scalar("SELECT triggered FROM alerts WHERE id = 'a1'")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert!(triggered);
+
+        state.db.close().await;
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[tokio::test]
+    async fn check_once_leaves_an_unmet_alert_untouched() {
+        let (state, db_path) = test_state().await;
+        state.spot_prices.lock().unwrap().insert("BTC".into(), 50_000.0);
+        insert_alert(&state, "a1", "BTC", "above", 65_000.0).await;
+
+        let fired = check_once(&state).await;
+        assert_eq!(fired, 0);
+
+        let triggered: bool = sqlx::query_scalar("SELECT triggered FROM alerts WHERE id = 'a1'")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert!(!triggered);
+
+        state.db.close().await;
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[tokio::test]
+    async fn check_once_does_not_re_fire_an_already_triggered_alert() {
+        let (state, db_path) = test_state().await;
+        state.spot_prices.lock().unwrap().insert("BTC".into(), 70_000.0);
+        insert_alert(&state, "a1", "BTC", "above", 65_000.0).await;
+
+        assert_eq!(check_once(&state).await, 1);
+        // Price stays well past the trigger; a second pass must not count
+        // it again now that it's already triggered.
+        assert_eq!(check_once(&state).await, 0);
+
+        state.db.close().await;
+        let _ = std::fs::remove_file(&db_path);
     }
 }
