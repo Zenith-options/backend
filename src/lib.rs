@@ -9,6 +9,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::{f64::consts::PI, sync::Arc};
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::request_id::{PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 
 pub mod alerts;
@@ -21,6 +22,7 @@ pub mod models;
 pub mod payoff;
 pub mod positions;
 pub mod prices;
+pub mod request_id;
 pub mod strategies;
 pub mod strkey;
 pub mod watchlist;
@@ -557,6 +559,10 @@ fn auth_rate_limited_routes() -> Router<AppState> {
         .layer(GovernorLayer { config })
 }
 
+fn request_id_header() -> axum::http::HeaderName {
+    axum::http::HeaderName::from_static("x-request-id")
+}
+
 pub fn build_router(state: AppState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -608,7 +614,12 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/strategies/execute",
             post(strategies::execute_strategy),
         )
+        .layer(PropagateRequestIdLayer::new(request_id_header()))
         .layer(TraceLayer::new_for_http())
+        .layer(SetRequestIdLayer::new(
+            request_id_header(),
+            request_id::MakeRequestUuid,
+        ))
         .layer(cors)
         .with_state(state)
 }

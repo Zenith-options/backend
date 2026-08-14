@@ -41,7 +41,15 @@ impl TestApp {
         }
     }
 
-    async fn send(&self, mut req: Request<Body>) -> (StatusCode, Value) {
+    async fn send(&self, req: Request<Body>) -> (StatusCode, Value) {
+        let (status, _headers, body) = self.send_raw(req).await;
+        (status, body)
+    }
+
+    /// Like `send`, but also returns response headers — for tests that
+    /// need to assert on something other than status/body (e.g.
+    /// x-request-id propagation).
+    async fn send_raw(&self, mut req: Request<Body>) -> (StatusCode, axum::http::HeaderMap, Value) {
         // Calling the router directly (rather than through axum::serve)
         // skips the connection layer that would normally populate this —
         // SmartIpKeyExtractor's peer-IP fallback needs it present the same
@@ -52,6 +60,7 @@ impl TestApp {
 
         let response = self.router.clone().oneshot(req).await.unwrap();
         let status = response.status();
+        let headers = response.headers().clone();
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -60,11 +69,24 @@ impl TestApp {
         } else {
             serde_json::from_slice(&bytes).unwrap()
         };
-        (status, body)
+        (status, headers, body)
     }
 
     pub async fn get(&self, path: &str) -> (StatusCode, Value) {
         self.get_with(path, None).await
+    }
+
+    /// GET with an arbitrary extra header, returning response headers too.
+    pub async fn get_raw(
+        &self,
+        path: &str,
+        extra_header: Option<(&str, &str)>,
+    ) -> (StatusCode, axum::http::HeaderMap, Value) {
+        let mut builder = Request::builder().method("GET").uri(path);
+        if let Some((name, value)) = extra_header {
+            builder = builder.header(name, value);
+        }
+        self.send_raw(builder.body(Body::empty()).unwrap()).await
     }
 
     pub async fn get_with(&self, path: &str, token: Option<&str>) -> (StatusCode, Value) {
