@@ -6,7 +6,7 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{AppError, AppJson};
+use crate::error::{db_error, AppError, AppJson};
 use crate::AppState;
 
 const NONCE_TTL_SECS: i64 = 5 * 60;
@@ -77,7 +77,7 @@ pub async fn post_nonce(
         .bind(&expires_at)
         .execute(&state.db)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("store auth nonce", e))?;
 
     Ok(Json(NonceResponse { nonce, message }))
 }
@@ -112,7 +112,7 @@ pub async fn post_verify(
             .bind(&req.wallet_address)
             .fetch_optional(&state.db)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|e| db_error("look up auth nonce", e))?;
 
     let (expires_at,) = row.ok_or_else(|| {
         AppError::new(
@@ -130,7 +130,7 @@ pub async fn post_verify(
         .bind(&req.message)
         .execute(&state.db)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("consume auth nonce", e))?;
 
     let pubkey_bytes =
         crate::strkey::decode_stellar_public_key(&req.wallet_address).map_err(|_| {
@@ -172,7 +172,7 @@ pub async fn post_verify(
     .bind(&req.wallet_address)
     .execute(&state.db)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| db_error("create or confirm account", e))?;
 
     let token = random_token_hex(32);
     let session_expires_at = format_unix_secs(now_unix() + SESSION_TTL_SECS);
@@ -182,7 +182,7 @@ pub async fn post_verify(
         .bind(&session_expires_at)
         .execute(&state.db)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("create session", e))?;
 
     Ok(Json(VerifyResponse {
         token,
@@ -219,7 +219,7 @@ impl FromRequestParts<AppState> for AuthUser {
                 .bind(token)
                 .fetch_optional(&state.db)
                 .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                .map_err(|e| db_error("look up session", e))?;
 
         let (wallet_address, expires_at) = row.ok_or_else(unauthorized)?;
         if expires_at.as_str() < format_unix_secs(now_unix()).as_str() {
