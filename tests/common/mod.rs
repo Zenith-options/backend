@@ -2,6 +2,12 @@
 //! (`build_router`) over a throwaway on-disk SQLite database, and offers
 //! thin request/response helpers so each test file can stay focused on
 //! what it's asserting instead of axum/tower plumbing.
+//!
+//! Each `tests/*_test.rs` file compiles this module into its own separate
+//! binary, so a helper only some test files call (e.g. `get` without a
+//! token, `delete_with`) looks "unused" from any one binary's point of
+//! view even though it's exercised by others.
+#![allow(dead_code)]
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
