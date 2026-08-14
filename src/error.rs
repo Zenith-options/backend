@@ -33,6 +33,19 @@ impl From<StatusCode> for AppError {
     }
 }
 
+/// Turns an unexpected sqlx::Error into a 500 whose client-facing message
+/// names WHICH operation failed ("failed to load alerts") without leaking
+/// the raw database error (table/column names, SQL fragments) into the
+/// response body — the raw error still goes to the logs via tracing, for
+/// whoever's actually debugging it.
+pub fn db_error(context: &str, e: sqlx::Error) -> AppError {
+    tracing::error!(error = %e, context, "database operation failed");
+    AppError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("failed to {context}"),
+    )
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         (self.status, Json(json!({ "error": self.message }))).into_response()

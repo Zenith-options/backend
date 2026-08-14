@@ -4,7 +4,7 @@ use axum::response::Json;
 use serde::Deserialize;
 
 use crate::auth::AuthUser;
-use crate::error::{AppError, AppJson};
+use crate::error::{db_error, AppError, AppJson};
 use crate::models::Alert;
 use crate::AppState;
 
@@ -17,7 +17,7 @@ pub async fn get_alerts(
             .bind(&wallet_address)
             .fetch_all(&state.db)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|e| db_error("load alerts", e))?;
 
     Ok(Json(alerts))
 }
@@ -70,13 +70,13 @@ pub async fn create_alert(
     .bind(req.target_price)
     .execute(&state.db)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| db_error("create alert", e))?;
 
     let alert: Alert = sqlx::query_as("SELECT * FROM alerts WHERE id = ?")
         .bind(&id)
         .fetch_one(&state.db)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("load the alert just created", e))?;
 
     Ok(Json(alert))
 }
@@ -91,7 +91,7 @@ pub async fn delete_alert(
         .bind(&wallet_address)
         .execute(&state.db)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("delete alert", e))?;
 
     if result.rows_affected() == 0 {
         return Err(AppError::new(
