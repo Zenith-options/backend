@@ -6,7 +6,7 @@ use sqlx::{Sqlite, Transaction};
 
 use crate::auth::AuthUser;
 use crate::collateral::collateral_required;
-use crate::error::{AppError, AppJson, AppQuery};
+use crate::error::{db_error, AppError, AppJson, AppQuery};
 use crate::models::{Account, Position};
 use crate::{black_scholes, smile_vol, AppState, BSInputs};
 
@@ -22,13 +22,13 @@ pub async fn get_account(
     .bind(&wallet_address)
     .execute(&state.db)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| db_error("create or confirm account", e))?;
 
     let account: Account = sqlx::query_as("SELECT * FROM accounts WHERE wallet_address = ?")
         .bind(&wallet_address)
         .fetch_one(&state.db)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("load account", e))?;
 
     Ok(Json(account))
 }
@@ -84,7 +84,7 @@ pub async fn list_positions(
     .bind(offset)
     .fetch_all(&state.db)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| db_error("list positions", e))?;
 
     let total: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM positions
@@ -99,7 +99,7 @@ pub async fn list_positions(
     .bind(&q.strategy_id)
     .fetch_one(&state.db)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| db_error("count positions", e))?;
 
     let has_more = offset + (positions.len() as i64) < total;
     let mut headers = HeaderMap::new();
@@ -195,7 +195,7 @@ pub(crate) async fn open_position_in_tx(
         .bind(wallet_address)
         .fetch_one(&mut **tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("load account", e))?;
 
     let new_balance = account.balance + cash_delta;
     let new_collateral_locked = account.collateral_locked + collateral;
@@ -215,7 +215,7 @@ pub(crate) async fn open_position_in_tx(
         .bind(wallet_address)
         .execute(&mut **tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("update account balance", e))?;
 
     let id = uuid::Uuid::new_v4().to_string();
     sqlx::query(
@@ -238,13 +238,13 @@ pub(crate) async fn open_position_in_tx(
     .bind(strategy_id)
     .execute(&mut **tx)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| db_error("insert position", e))?;
 
     let position: Position = sqlx::query_as("SELECT * FROM positions WHERE id = ?")
         .bind(&id)
         .fetch_one(&mut **tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("load the position just opened", e))?;
 
     Ok(position)
 }
@@ -258,11 +258,11 @@ pub async fn open_position(
         .db
         .begin()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("begin open-position transaction", e))?;
     let position = open_position_in_tx(&mut tx, &state, &wallet_address, &req, None).await?;
     tx.commit()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("commit open-position transaction", e))?;
     Ok(Json(position))
 }
 
@@ -288,7 +288,7 @@ async fn close_position_in_tx(
     .bind(wallet_address)
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|e| db_error("look up position", e))?
     .ok_or_else(|| {
         AppError::new(
             StatusCode::NOT_FOUND,
@@ -339,7 +339,7 @@ async fn close_position_in_tx(
         .bind(wallet_address)
         .fetch_one(&mut **tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("load account", e))?;
 
     let new_balance = account.balance + cash_delta;
     let new_collateral_locked = account.collateral_locked - position.collateral;
@@ -350,7 +350,7 @@ async fn close_position_in_tx(
         .bind(wallet_address)
         .execute(&mut **tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("update account balance", e))?;
 
     sqlx::query(
         "UPDATE positions
