@@ -146,20 +146,24 @@ real theta-decay model.
 - `Dockerfile` and the CI workflow are not build/run-tested against a
   real Docker daemon or GitHub Actions runner from this environment —
   reviewed for correctness, not executed end-to-end.
-- Rate limiting is per-IP, not per-wallet — a shared IP (NAT, VPN,
-  corporate network) means every wallet behind it shares one quota.
-  Acceptable for a paper-trading demo; a real deployment would want a
-  second limiter keyed on the session token for authenticated routes.
+- The mutation rate limiter's bearer-token fallback (for requests with
+  no token at all) keys on peer IP only, without replicating
+  SmartIpKeyExtractor's x-forwarded-for/x-real-ip/forwarded header
+  chain — acceptable since that fallback path is only reached by
+  requests that fail AuthUser's own check regardless, but it does mean
+  that one specific path isn't proxy-aware the way the auth endpoints'
+  limiter is.
 
 Previously listed here and since addressed: the three background loops
 (auth cleanup, alert checks, price simulator) now have direct unit
 tests against their extracted per-tick logic; the rate limiter moved
-off a single global quota to per-IP (`SmartIpKeyExtractor`) and now
-covers every mutating endpoint (positions, watchlist, alerts,
-strategies), not just the two auth ones; `list_positions`/`get_history`
-now report total count and whether more pages exist
-(`x-total-count`/`x-has-more` headers on positions, a `has_more` field
-on history) instead of leaving a paging client to guess.
+off a single global quota to per-IP (`SmartIpKeyExtractor`) on the auth
+endpoints and per-wallet (`BearerOrIpKeyExtractor`) on every mutating
+one (positions, watchlist, alerts, strategies), so wallets sharing an
+IP no longer share a quota; `list_positions`/`get_history` now report
+total count and whether more pages exist (`x-total-count`/`x-has-more`
+headers on positions, a `has_more` field on history) instead of
+leaving a paging client to guess.
 
 ## License
 
