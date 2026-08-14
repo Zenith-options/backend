@@ -559,6 +559,41 @@ fn auth_rate_limited_routes() -> Router<AppState> {
         .layer(GovernorLayer { config })
 }
 
+/// Every write endpoint that mutates trading/account state, behind a more
+/// generous per-IP quota than the auth endpoints (these require a valid
+/// session, so abuse here is bounded by needing wallets in the first
+/// place — but a single compromised or careless client still shouldn't
+/// be able to hammer the DB with unlimited opens/closes/rolls).
+fn mutation_rate_limited_routes() -> Router<AppState> {
+    use tower_governor::{
+        governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer,
+    };
+
+    let config = Arc::new(
+        GovernorConfigBuilder::default()
+            .key_extractor(SmartIpKeyExtractor)
+            .per_second(5)
+            .burst_size(20)
+            .finish()
+            .expect("rate limiter config"),
+    );
+
+    Router::new()
+        .route("/api/v1/positions/open", post(positions::open_position))
+        .route(
+            "/api/v1/positions/:id/close",
+            post(positions::close_position),
+        )
+        .route("/api/v1/positions/:id/roll", post(positions::roll_position))
+        .route("/api/v1/watchlist", post(watchlist::add_watchlist))
+        .route("/api/v1/alerts", post(alerts::create_alert))
+        .route(
+            "/api/v1/strategies/execute",
+            post(strategies::execute_strategy),
+        )
+        .layer(GovernorLayer { config })
+}
+
 fn request_id_header() -> axum::http::HeaderName {
     axum::http::HeaderName::from_static("x-request-id")
 }
@@ -578,28 +613,17 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/expiries/:underlying", get(get_expiry_calendar))
         .route("/api/v1/stats", get(get_protocol_stats))
         .merge(auth_rate_limited_routes())
+        .merge(mutation_rate_limited_routes())
         .route("/api/v1/auth/me", get(auth::get_me))
         .route("/api/v1/account", get(positions::get_account))
         .route("/api/v1/positions", get(positions::list_positions))
-        .route("/api/v1/positions/open", post(positions::open_position))
-        .route(
-            "/api/v1/positions/:id/close",
-            post(positions::close_position),
-        )
-        .route("/api/v1/positions/:id/roll", post(positions::roll_position))
         .route("/api/v1/history", get(history::get_history))
-        .route(
-            "/api/v1/watchlist",
-            get(watchlist::get_watchlist).post(watchlist::add_watchlist),
-        )
+        .route("/api/v1/watchlist", get(watchlist::get_watchlist))
         .route(
             "/api/v1/watchlist/:underlying",
             axum::routing::delete(watchlist::remove_watchlist),
         )
-        .route(
-            "/api/v1/alerts",
-            get(alerts::get_alerts).post(alerts::create_alert),
-        )
+        .route("/api/v1/alerts", get(alerts::get_alerts))
         .route(
             "/api/v1/alerts/:id",
             axum::routing::delete(alerts::delete_alert),
@@ -609,10 +633,6 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/portfolio/greeks",
             get(positions::get_portfolio_greeks),
-        )
-        .route(
-            "/api/v1/strategies/execute",
-            post(strategies::execute_strategy),
         )
         .layer(PropagateRequestIdLayer::new(request_id_header()))
         .layer(TraceLayer::new_for_http())

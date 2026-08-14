@@ -67,7 +67,12 @@ impl TestApp {
         let body = if bytes.is_empty() {
             Value::Null
         } else {
-            serde_json::from_slice(&bytes).unwrap()
+            // Not every response is JSON-bodied — tower_governor's 429s are
+            // plain text ("Too Many Requests! Wait for Ns"). Fall back to
+            // the raw text as a JSON string rather than unwrapping, so
+            // tests that only care about `status` don't panic on those.
+            serde_json::from_slice(&bytes)
+                .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()))
         };
         (status, headers, body)
     }
