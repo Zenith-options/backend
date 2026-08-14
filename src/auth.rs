@@ -61,7 +61,10 @@ pub async fn post_nonce(
     Json(req): Json<NonceRequest>,
 ) -> Result<Json<NonceResponse>, AppError> {
     if crate::strkey::decode_stellar_public_key(&req.wallet_address).is_err() {
-        return Err(AppError::new(StatusCode::BAD_REQUEST, "wallet_address is not a valid Stellar G... address"));
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "wallet_address is not a valid Stellar G... address",
+        ));
     }
 
     let nonce = random_token_hex(16);
@@ -103,17 +106,19 @@ pub async fn post_verify(
     State(state): State<AppState>,
     Json(req): Json<VerifyRequest>,
 ) -> Result<Json<VerifyResponse>, AppError> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT expires_at FROM auth_nonces WHERE nonce = ? AND wallet_address = ?",
-    )
-    .bind(&req.message)
-    .bind(&req.wallet_address)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT expires_at FROM auth_nonces WHERE nonce = ? AND wallet_address = ?")
+            .bind(&req.message)
+            .bind(&req.wallet_address)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let (expires_at,) = row.ok_or_else(|| {
-        AppError::new(StatusCode::UNAUTHORIZED, "unknown or already-consumed nonce")
+        AppError::new(
+            StatusCode::UNAUTHORIZED,
+            "unknown or already-consumed nonce",
+        )
     })?;
     if expires_at.as_str() < format_unix_secs(now_unix()).as_str() {
         return Err(AppError::new(StatusCode::UNAUTHORIZED, "nonce expired"));
@@ -127,22 +132,39 @@ pub async fn post_verify(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let pubkey_bytes = crate::strkey::decode_stellar_public_key(&req.wallet_address)
-        .map_err(|_| AppError::new(StatusCode::BAD_REQUEST, "wallet_address is not a valid Stellar G... address"))?;
-    let verifying_key = VerifyingKey::from_bytes(&pubkey_bytes)
-        .map_err(|_| AppError::new(StatusCode::BAD_REQUEST, "wallet_address decodes to an invalid ed25519 key"))?;
+    let pubkey_bytes =
+        crate::strkey::decode_stellar_public_key(&req.wallet_address).map_err(|_| {
+            AppError::new(
+                StatusCode::BAD_REQUEST,
+                "wallet_address is not a valid Stellar G... address",
+            )
+        })?;
+    let verifying_key = VerifyingKey::from_bytes(&pubkey_bytes).map_err(|_| {
+        AppError::new(
+            StatusCode::BAD_REQUEST,
+            "wallet_address decodes to an invalid ed25519 key",
+        )
+    })?;
 
     let sig_bytes = BASE64
         .decode(req.signature.as_bytes())
         .map_err(|_| AppError::new(StatusCode::BAD_REQUEST, "signature is not valid base64"))?;
-    let sig_array: [u8; 64] = sig_bytes
-        .try_into()
-        .map_err(|_| AppError::new(StatusCode::BAD_REQUEST, "signature must be exactly 64 bytes"))?;
+    let sig_array: [u8; 64] = sig_bytes.try_into().map_err(|_| {
+        AppError::new(
+            StatusCode::BAD_REQUEST,
+            "signature must be exactly 64 bytes",
+        )
+    })?;
     let signature = Signature::from_bytes(&sig_array);
 
     verifying_key
         .verify_strict(req.message.as_bytes(), &signature)
-        .map_err(|_| AppError::new(StatusCode::UNAUTHORIZED, "signature does not verify against wallet_address for this message"))?;
+        .map_err(|_| {
+            AppError::new(
+                StatusCode::UNAUTHORIZED,
+                "signature does not verify against wallet_address for this message",
+            )
+        })?;
 
     sqlx::query(
         "INSERT INTO accounts (wallet_address) VALUES (?) ON CONFLICT(wallet_address) DO NOTHING",
@@ -162,7 +184,10 @@ pub async fn post_verify(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(VerifyResponse { token, wallet_address: req.wallet_address }))
+    Ok(Json(VerifyResponse {
+        token,
+        wallet_address: req.wallet_address,
+    }))
 }
 
 /// Extractor for routes that require a logged-in wallet. Reads
@@ -178,7 +203,8 @@ impl FromRequestParts<AppState> for AuthUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let unauthorized = || AppError::new(StatusCode::UNAUTHORIZED, "missing or invalid bearer token");
+        let unauthorized =
+            || AppError::new(StatusCode::UNAUTHORIZED, "missing or invalid bearer token");
 
         let header = parts
             .headers

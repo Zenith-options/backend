@@ -13,7 +13,11 @@ fn crc16_xmodem(data: &[u8]) -> u16 {
     for &byte in data {
         crc ^= (byte as u16) << 8;
         for _ in 0..8 {
-            crc = if crc & 0x8000 != 0 { (crc << 1) ^ 0x1021 } else { crc << 1 };
+            crc = if crc & 0x8000 != 0 {
+                (crc << 1) ^ 0x1021
+            } else {
+                crc << 1
+            };
         }
     }
     crc
@@ -36,7 +40,10 @@ pub fn decode_stellar_public_key(address: &str) -> Result<[u8; 32], String> {
         .map_err(|_| "address is not valid base32".to_string())?;
 
     if raw.len() != 35 {
-        return Err(format!("expected a 35-byte strkey payload, got {}", raw.len()));
+        return Err(format!(
+            "expected a 35-byte strkey payload, got {}",
+            raw.len()
+        ));
     }
     if raw[0] != ED25519_PUBLIC_KEY_VERSION_BYTE {
         return Err("address is not an ed25519 public key (wrong version byte)".to_string());

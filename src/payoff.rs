@@ -42,12 +42,20 @@ pub struct PayoffPoint {
 
 /// Series of {spot, pnl} points across a spot range, for charting the
 /// combined curve.
-pub fn combined_payoff_series(legs: &[PricedLeg], lo_spot: f64, hi_spot: f64, steps: u32) -> Vec<PayoffPoint> {
+pub fn combined_payoff_series(
+    legs: &[PricedLeg],
+    lo_spot: f64,
+    hi_spot: f64,
+    steps: u32,
+) -> Vec<PayoffPoint> {
     let range = hi_spot - lo_spot;
     (0..=steps)
         .map(|i| {
             let spot = lo_spot + (range * i as f64) / steps as f64;
-            PayoffPoint { spot, pnl: combined_pnl(legs, spot) }
+            PayoffPoint {
+                spot,
+                pnl: combined_pnl(legs, spot),
+            }
         })
         .collect()
 }
@@ -55,7 +63,11 @@ pub fn combined_payoff_series(legs: &[PricedLeg], lo_spot: f64, hi_spot: f64, st
 /// Positive = net debit paid to enter; negative = net credit received.
 pub fn net_premium(legs: &[PricedLeg]) -> f64 {
     legs.iter().fold(0.0, |total, leg| {
-        let signed = if leg.position_type == "long" { leg.premium } else { -leg.premium };
+        let signed = if leg.position_type == "long" {
+            leg.premium
+        } else {
+            -leg.premium
+        };
         total + signed * leg.contracts
     })
 }
@@ -84,25 +96,43 @@ pub struct PayoffResponse {
 /// premium from a prior /api/v1/price call before it needs this.
 pub async fn post_payoff(Json(req): Json<PayoffRequest>) -> Result<Json<PayoffResponse>, AppError> {
     if req.legs.is_empty() {
-        return Err(AppError::new(StatusCode::BAD_REQUEST, "legs must not be empty"));
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "legs must not be empty",
+        ));
     }
     if req.hi_spot <= req.lo_spot {
-        return Err(AppError::new(StatusCode::BAD_REQUEST, "hi_spot must be greater than lo_spot"));
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "hi_spot must be greater than lo_spot",
+        ));
     }
     if req.steps == 0 {
-        return Err(AppError::new(StatusCode::BAD_REQUEST, "steps must be positive"));
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "steps must be positive",
+        ));
     }
 
     let points = combined_payoff_series(&req.legs, req.lo_spot, req.hi_spot, req.steps);
     let net_premium = net_premium(&req.legs);
-    Ok(Json(PayoffResponse { points, net_premium }))
+    Ok(Json(PayoffResponse {
+        points,
+        net_premium,
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn leg(option_type: &str, position_type: &str, strike: f64, contracts: f64, premium: f64) -> PricedLeg {
+    fn leg(
+        option_type: &str,
+        position_type: &str,
+        strike: f64,
+        contracts: f64,
+        premium: f64,
+    ) -> PricedLeg {
         PricedLeg {
             option_type: option_type.to_string(),
             position_type: position_type.to_string(),

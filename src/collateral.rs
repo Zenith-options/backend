@@ -19,11 +19,17 @@ mod tests {
 
     #[test]
     fn covered_call_is_100_percent_of_spot() {
-        assert_eq!(collateral_required("call", 2.0, 70000.0, 67420.50), 2.0 * 67420.50);
+        assert_eq!(
+            collateral_required("call", 2.0, 70000.0, 67420.50),
+            2.0 * 67420.50
+        );
     }
 
     #[test]
     fn cash_secured_put_is_110_percent_of_strike() {
-        assert_eq!(collateral_required("put", 3.0, 60000.0, 67420.50), 3.0 * 60000.0 * 1.1);
+        assert_eq!(
+            collateral_required("put", 3.0, 60000.0, 67420.50),
+            3.0 * 60000.0 * 1.1
+        );
     }
 }

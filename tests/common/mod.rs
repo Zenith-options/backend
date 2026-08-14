@@ -33,14 +33,23 @@ impl TestApp {
         let database_url = format!("sqlite://{}", db_path.display());
         let pool = zenith_backend::db::init_pool(&database_url).await;
         let state = zenith_backend::AppState::new(pool);
-        Self { router: zenith_backend::build_router(state), db_path }
+        Self {
+            router: zenith_backend::build_router(state),
+            db_path,
+        }
     }
 
     async fn send(&self, req: Request<Body>) -> (StatusCode, Value) {
         let response = self.router.clone().oneshot(req).await.unwrap();
         let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let body = if bytes.is_empty() { Value::Null } else { serde_json::from_slice(&bytes).unwrap() };
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
         (status, body)
     }
 
@@ -60,7 +69,12 @@ impl TestApp {
         self.post_with(path, body, None).await
     }
 
-    pub async fn post_with(&self, path: &str, body: Value, token: Option<&str>) -> (StatusCode, Value) {
+    pub async fn post_with(
+        &self,
+        path: &str,
+        body: Value,
+        token: Option<&str>,
+    ) -> (StatusCode, Value) {
         let mut builder = Request::builder()
             .method("POST")
             .uri(path)
@@ -68,7 +82,8 @@ impl TestApp {
         if let Some(token) = token {
             builder = builder.header("authorization", format!("Bearer {token}"));
         }
-        self.send(builder.body(Body::from(body.to_string())).unwrap()).await
+        self.send(builder.body(Body::from(body.to_string())).unwrap())
+            .await
     }
 
     pub async fn delete_with(&self, path: &str, token: &str) -> (StatusCode, Value) {
@@ -87,10 +102,15 @@ impl TestApp {
         let mut seed = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut seed);
         let signing_key = SigningKey::from_bytes(&seed);
-        let address = zenith_backend::strkey::encode_stellar_public_key(signing_key.verifying_key().as_bytes());
+        let address = zenith_backend::strkey::encode_stellar_public_key(
+            signing_key.verifying_key().as_bytes(),
+        );
 
         let (_, nonce_resp) = self
-            .post("/api/v1/auth/nonce", serde_json::json!({ "wallet_address": address }))
+            .post(
+                "/api/v1/auth/nonce",
+                serde_json::json!({ "wallet_address": address }),
+            )
             .await;
         let message = nonce_resp["message"].as_str().unwrap();
         let signature = signing_key.sign(message.as_bytes());

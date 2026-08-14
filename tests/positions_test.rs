@@ -84,7 +84,13 @@ async fn close_settles_position_and_appears_in_history() {
         .await;
     let id = opened["id"].as_str().unwrap();
 
-    let (status, closed) = app.post_with(&format!("/api/v1/positions/{id}/close"), serde_json::Value::Null, Some(&token)).await;
+    let (status, closed) = app
+        .post_with(
+            &format!("/api/v1/positions/{id}/close"),
+            serde_json::Value::Null,
+            Some(&token),
+        )
+        .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(closed["status"].as_str().unwrap(), "closed");
     // Spot hasn't moved between open and close in this test, so pricing
@@ -114,10 +120,22 @@ async fn closing_twice_404s_the_second_time() {
         .await;
     let id = opened["id"].as_str().unwrap();
 
-    let (first, _) = app.post_with(&format!("/api/v1/positions/{id}/close"), serde_json::Value::Null, Some(&token)).await;
+    let (first, _) = app
+        .post_with(
+            &format!("/api/v1/positions/{id}/close"),
+            serde_json::Value::Null,
+            Some(&token),
+        )
+        .await;
     assert_eq!(first, StatusCode::OK);
 
-    let (second, _) = app.post_with(&format!("/api/v1/positions/{id}/close"), serde_json::Value::Null, Some(&token)).await;
+    let (second, _) = app
+        .post_with(
+            &format!("/api/v1/positions/{id}/close"),
+            serde_json::Value::Null,
+            Some(&token),
+        )
+        .await;
     assert_eq!(second, StatusCode::NOT_FOUND);
 }
 
@@ -199,5 +217,9 @@ async fn strategy_execute_is_atomic_on_partial_failure() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 
     let (_, positions) = app.get_with("/api/v1/positions", Some(&token)).await;
-    assert_eq!(positions.as_array().unwrap().len(), 0, "the successful first leg must have been rolled back");
+    assert_eq!(
+        positions.as_array().unwrap().len(),
+        0,
+        "the successful first leg must have been rolled back"
+    );
 }

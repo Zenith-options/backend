@@ -89,19 +89,33 @@ pub(crate) async fn open_position_in_tx(
     strategy_id: Option<&str>,
 ) -> Result<Position, AppError> {
     if req.contracts <= 0.0 || req.strike <= 0.0 || req.expiry_days <= 0.0 {
-        return Err(AppError::new(StatusCode::BAD_REQUEST, "contracts, strike, and expiry_days must all be positive"));
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "contracts, strike, and expiry_days must all be positive",
+        ));
     }
     if req.option_type != "call" && req.option_type != "put" {
-        return Err(AppError::new(StatusCode::BAD_REQUEST, "option_type must be \"call\" or \"put\""));
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "option_type must be \"call\" or \"put\"",
+        ));
     }
     if req.position_type != "long" && req.position_type != "short" {
-        return Err(AppError::new(StatusCode::BAD_REQUEST, "position_type must be \"long\" or \"short\""));
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "position_type must be \"long\" or \"short\"",
+        ));
     }
 
     let (spot, base_vol) = {
         let prices = state.spot_prices.lock().unwrap();
         let vols = state.vol_surface.lock().unwrap();
-        let not_found = || AppError::new(StatusCode::NOT_FOUND, format!("unknown underlying \"{}\"", req.underlying));
+        let not_found = || {
+            AppError::new(
+                StatusCode::NOT_FOUND,
+                format!("unknown underlying \"{}\"", req.underlying),
+            )
+        };
         let spot = *prices.get(&req.underlying).ok_or_else(not_found)?;
         let vol = *vols.get(&req.underlying).ok_or_else(not_found)?;
         (spot, vol)
@@ -195,9 +209,15 @@ pub async fn open_position(
     AuthUser(wallet_address): AuthUser,
     Json(req): Json<OpenPositionRequest>,
 ) -> Result<Json<Position>, AppError> {
-    let mut tx = state.db.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let position = open_position_in_tx(&mut tx, &state, &wallet_address, &req, None).await?;
-    tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    tx.commit()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(position))
 }
 
@@ -224,13 +244,21 @@ async fn close_position_in_tx(
     .fetch_optional(&mut **tx)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, "no open position with that id for this wallet"))?;
+    .ok_or_else(|| {
+        AppError::new(
+            StatusCode::NOT_FOUND,
+            "no open position with that id for this wallet",
+        )
+    })?;
 
     let (spot, base_vol) = {
         let prices = state.spot_prices.lock().unwrap();
         let vols = state.vol_surface.lock().unwrap();
         let not_found = || {
-            AppError::new(StatusCode::NOT_FOUND, format!("unknown underlying \"{}\"", position.underlying))
+            AppError::new(
+                StatusCode::NOT_FOUND,
+                format!("unknown underlying \"{}\"", position.underlying),
+            )
         };
         let spot = *prices.get(&position.underlying).ok_or_else(not_found)?;
         let vol = *vols.get(&position.underlying).ok_or_else(not_found)?;
@@ -240,7 +268,15 @@ async fn close_position_in_tx(
     let vol = smile_vol(base_vol, position.strike / spot);
     let t = position.expiry_days / 365.0;
     let is_call = position.option_type == "call";
-    let close_premium = black_scholes(&BSInputs { spot, strike: position.strike, vol, t, r: 0.05, is_call }).premium;
+    let close_premium = black_scholes(&BSInputs {
+        spot,
+        strike: position.strike,
+        vol,
+        t,
+        r: 0.05,
+        is_call,
+    })
+    .premium;
 
     let is_short = position.position_type == "short";
     let realized_pnl = if is_short {
@@ -299,9 +335,15 @@ pub async fn close_position(
     AuthUser(wallet_address): AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<Position>, AppError> {
-    let mut tx = state.db.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let closed = close_position_in_tx(&mut tx, &state, &wallet_address, &id).await?;
-    tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    tx.commit()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(closed))
 }
 
@@ -326,7 +368,11 @@ pub async fn roll_position(
     Path(id): Path<String>,
     Json(req): Json<RollPositionRequest>,
 ) -> Result<Json<RollResult>, AppError> {
-    let mut tx = state.db.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut closed = close_position_in_tx(&mut tx, &state, &wallet_address, &id).await?;
     // close_position_in_tx always marks the row 'closed'; a roll is
@@ -349,9 +395,18 @@ pub async fn roll_position(
     };
     // Preserve strategy grouping across a roll: the replacement leg
     // belongs to the same multi-leg strategy as the one it replaced.
-    let opened = open_position_in_tx(&mut tx, &state, &wallet_address, &open_req, closed.strategy_id.as_deref()).await?;
+    let opened = open_position_in_tx(
+        &mut tx,
+        &state,
+        &wallet_address,
+        &open_req,
+        closed.strategy_id.as_deref(),
+    )
+    .await?;
 
-    tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    tx.commit()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(RollResult { closed, opened }))
 }
 
@@ -391,9 +446,20 @@ pub async fn get_portfolio_greeks(
         let vol = smile_vol(base_vol, p.strike / spot);
         let t = p.expiry_days / 365.0;
         let is_call = p.option_type == "call";
-        let result = black_scholes(&BSInputs { spot, strike: p.strike, vol, t, r: 0.05, is_call });
+        let result = black_scholes(&BSInputs {
+            spot,
+            strike: p.strike,
+            vol,
+            t,
+            r: 0.05,
+            is_call,
+        });
 
-        let sign = if p.position_type == "short" { -1.0 } else { 1.0 };
+        let sign = if p.position_type == "short" {
+            -1.0
+        } else {
+            1.0
+        };
         totals.delta += sign * result.delta * p.contracts;
         totals.gamma += sign * result.gamma * p.contracts;
         totals.theta += sign * result.theta * p.contracts;

@@ -22,7 +22,9 @@ async fn create_list_delete_round_trip() {
     let (_, list) = app.get_with("/api/v1/alerts", Some(&token)).await;
     assert_eq!(list.as_array().unwrap().len(), 1);
 
-    let (status, _) = app.delete_with(&format!("/api/v1/alerts/{id}"), &token).await;
+    let (status, _) = app
+        .delete_with(&format!("/api/v1/alerts/{id}"), &token)
+        .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     let (_, list_after) = app.get_with("/api/v1/alerts", Some(&token)).await;
@@ -90,6 +92,12 @@ async fn deleting_someone_elses_alert_404s() {
         .await;
     let id = alert["id"].as_str().unwrap();
 
-    let (status, _) = app.delete_with(&format!("/api/v1/alerts/{id}"), &stranger).await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "a wallet must not be able to delete another wallet's alert");
+    let (status, _) = app
+        .delete_with(&format!("/api/v1/alerts/{id}"), &stranger)
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a wallet must not be able to delete another wallet's alert"
+    );
 }

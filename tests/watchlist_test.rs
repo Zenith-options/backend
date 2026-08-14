@@ -8,7 +8,13 @@ async fn add_list_delete_round_trip() {
     let app = TestApp::spawn().await;
     let token = app.login().await;
 
-    let (status, _) = app.post_with("/api/v1/watchlist", serde_json::json!({ "underlying": "BTC" }), Some(&token)).await;
+    let (status, _) = app
+        .post_with(
+            "/api/v1/watchlist",
+            serde_json::json!({ "underlying": "BTC" }),
+            Some(&token),
+        )
+        .await;
     assert_eq!(status, StatusCode::CREATED);
 
     let (_, list) = app.get_with("/api/v1/watchlist", Some(&token)).await;
@@ -28,8 +34,20 @@ async fn adding_the_same_symbol_twice_is_idempotent() {
     let app = TestApp::spawn().await;
     let token = app.login().await;
 
-    let (s1, _) = app.post_with("/api/v1/watchlist", serde_json::json!({ "underlying": "XLM" }), Some(&token)).await;
-    let (s2, _) = app.post_with("/api/v1/watchlist", serde_json::json!({ "underlying": "XLM" }), Some(&token)).await;
+    let (s1, _) = app
+        .post_with(
+            "/api/v1/watchlist",
+            serde_json::json!({ "underlying": "XLM" }),
+            Some(&token),
+        )
+        .await;
+    let (s2, _) = app
+        .post_with(
+            "/api/v1/watchlist",
+            serde_json::json!({ "underlying": "XLM" }),
+            Some(&token),
+        )
+        .await;
     assert_eq!(s1, StatusCode::CREATED);
     assert_eq!(s2, StatusCode::CREATED);
 
@@ -42,7 +60,13 @@ async fn adding_unknown_symbol_404s() {
     let app = TestApp::spawn().await;
     let token = app.login().await;
 
-    let (status, _) = app.post_with("/api/v1/watchlist", serde_json::json!({ "underlying": "DOGE" }), Some(&token)).await;
+    let (status, _) = app
+        .post_with(
+            "/api/v1/watchlist",
+            serde_json::json!({ "underlying": "DOGE" }),
+            Some(&token),
+        )
+        .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -61,8 +85,17 @@ async fn watchlist_is_scoped_per_wallet() {
     let token_a = app.login().await;
     let token_b = app.login().await;
 
-    app.post_with("/api/v1/watchlist", serde_json::json!({ "underlying": "BTC" }), Some(&token_a)).await;
+    app.post_with(
+        "/api/v1/watchlist",
+        serde_json::json!({ "underlying": "BTC" }),
+        Some(&token_a),
+    )
+    .await;
 
     let (_, list_b) = app.get_with("/api/v1/watchlist", Some(&token_b)).await;
-    assert_eq!(list_b.as_array().unwrap().len(), 0, "wallet B must not see wallet A's watchlist");
+    assert_eq!(
+        list_b.as_array().unwrap().len(),
+        0,
+        "wallet B must not see wallet A's watchlist"
+    );
 }

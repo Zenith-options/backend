@@ -1,3 +1,4 @@
+use axum::http::Method;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -9,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use std::{f64::consts::PI, sync::Arc};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
-use axum::http::Method;
 
 pub mod alerts;
 pub mod auth;
@@ -29,16 +29,22 @@ pub mod watchlist;
 
 /// Cumulative standard normal distribution (Abramowitz & Stegun approximation)
 fn norm_cdf(x: f64) -> f64 {
-    if x < -7.0 { return 0.0; }
-    if x >  7.0 { return 1.0; }
+    if x < -7.0 {
+        return 0.0;
+    }
+    if x > 7.0 {
+        return 1.0;
+    }
     let k = 1.0 / (1.0 + 0.2316419 * x.abs());
-    let poly = k * (0.319381530
-        + k * (-0.356563782
-        + k * (1.781477937
-        + k * (-1.821255978
-        + k * 1.330274429))));
+    let poly = k
+        * (0.319381530
+            + k * (-0.356563782 + k * (1.781477937 + k * (-1.821255978 + k * 1.330274429))));
     let pdf = (-x * x / 2.0).exp() / (2.0 * PI).sqrt();
-    if x >= 0.0 { 1.0 - pdf * poly } else { pdf * poly }
+    if x >= 0.0 {
+        1.0 - pdf * poly
+    } else {
+        pdf * poly
+    }
 }
 
 /// Standard normal PDF
@@ -63,11 +69,11 @@ pub(crate) fn smile_vol(base: f64, moneyness: f64) -> f64 {
 
 #[derive(Debug, Clone)]
 pub struct BSInputs {
-    pub spot: f64,       // current price
-    pub strike: f64,     // strike price
-    pub vol: f64,        // annualised volatility (e.g. 0.80 = 80%)
-    pub t: f64,          // time to expiry in years
-    pub r: f64,          // risk-free rate (e.g. 0.05 = 5%)
+    pub spot: f64,   // current price
+    pub strike: f64, // strike price
+    pub vol: f64,    // annualised volatility (e.g. 0.80 = 80%)
+    pub t: f64,      // time to expiry in years
+    pub r: f64,      // risk-free rate (e.g. 0.05 = 5%)
     pub is_call: bool,
 }
 
@@ -76,8 +82,8 @@ pub struct BSResult {
     pub premium: f64,
     pub delta: f64,
     pub gamma: f64,
-    pub theta: f64,      // per day
-    pub vega: f64,       // per 1% vol move
+    pub theta: f64, // per day
+    pub vega: f64,  // per 1% vol move
     pub rho: f64,
     pub d1: f64,
     pub d2: f64,
@@ -87,7 +93,14 @@ pub struct BSResult {
 }
 
 pub fn black_scholes(inputs: &BSInputs) -> BSResult {
-    let BSInputs { spot: s, strike: k, vol: sigma, t, r, is_call } = *inputs;
+    let BSInputs {
+        spot: s,
+        strike: k,
+        vol: sigma,
+        t,
+        r,
+        is_call,
+    } = *inputs;
 
     if t <= 0.0 {
         // At expiry: intrinsic only
@@ -97,9 +110,17 @@ pub fn black_scholes(inputs: &BSInputs) -> BSResult {
             (k - s).max(0.0)
         };
         return BSResult {
-            premium: intrinsic, delta: if is_call { 1.0 } else { -1.0 },
-            gamma: 0.0, theta: 0.0, vega: 0.0, rho: 0.0,
-            d1: 0.0, d2: 0.0, intrinsic, time_value: 0.0, iv: sigma,
+            premium: intrinsic,
+            delta: if is_call { 1.0 } else { -1.0 },
+            gamma: 0.0,
+            theta: 0.0,
+            vega: 0.0,
+            rho: 0.0,
+            d1: 0.0,
+            d2: 0.0,
+            intrinsic,
+            time_value: 0.0,
+            iv: sigma,
         };
     }
 
@@ -113,47 +134,85 @@ pub fn black_scholes(inputs: &BSInputs) -> BSResult {
         let nd1 = norm_cdf(d1);
         let nd2 = norm_cdf(d2);
         let price = s * nd1 - k * disc * nd2;
-        let del   = nd1;
+        let del = nd1;
         let r_val = k * t * disc * nd2 / 100.0;
         (price, del, r_val)
     } else {
         let nd1 = norm_cdf(-d1);
         let nd2 = norm_cdf(-d2);
         let price = k * disc * nd2 - s * nd1;
-        let del   = nd1 - 1.0;
+        let del = nd1 - 1.0;
         let r_val = -k * t * disc * nd2 / 100.0;
         (price, del, r_val)
     };
 
     let pdf_d1 = norm_pdf(d1);
-    let gamma  = pdf_d1 / (s * sigma * sqrt_t);
-    let vega   = s * pdf_d1 * sqrt_t / 100.0;  // per 1% vol
+    let gamma = pdf_d1 / (s * sigma * sqrt_t);
+    let vega = s * pdf_d1 * sqrt_t / 100.0; // per 1% vol
 
     let theta = if is_call {
-        (-(s * pdf_d1 * sigma) / (2.0 * sqrt_t)
-            - r * k * disc * norm_cdf(d2)) / 365.0
+        (-(s * pdf_d1 * sigma) / (2.0 * sqrt_t) - r * k * disc * norm_cdf(d2)) / 365.0
     } else {
-        (-(s * pdf_d1 * sigma) / (2.0 * sqrt_t)
-            + r * k * disc * norm_cdf(-d2)) / 365.0
+        (-(s * pdf_d1 * sigma) / (2.0 * sqrt_t) + r * k * disc * norm_cdf(-d2)) / 365.0
     };
 
-    let intrinsic = if is_call { (s - k).max(0.0) } else { (k - s).max(0.0) };
+    let intrinsic = if is_call {
+        (s - k).max(0.0)
+    } else {
+        (k - s).max(0.0)
+    };
     let time_value = premium - intrinsic;
 
-    BSResult { premium, delta, gamma, theta, vega, rho, d1, d2, intrinsic, time_value, iv: sigma }
+    BSResult {
+        premium,
+        delta,
+        gamma,
+        theta,
+        vega,
+        rho,
+        d1,
+        d2,
+        intrinsic,
+        time_value,
+        iv: sigma,
+    }
 }
 
 /// Newton-Raphson implied volatility solver
-pub fn implied_vol(market_price: f64, spot: f64, strike: f64, t: f64, r: f64, is_call: bool) -> Option<f64> {
-    let intrinsic = if is_call { (spot - strike).max(0.0) } else { (strike - spot).max(0.0) };
-    if market_price < intrinsic { return None; }
+pub fn implied_vol(
+    market_price: f64,
+    spot: f64,
+    strike: f64,
+    t: f64,
+    r: f64,
+    is_call: bool,
+) -> Option<f64> {
+    let intrinsic = if is_call {
+        (spot - strike).max(0.0)
+    } else {
+        (strike - spot).max(0.0)
+    };
+    if market_price < intrinsic {
+        return None;
+    }
 
     let mut sigma = 0.5_f64; // initial guess
     for _ in 0..100 {
-        let bs = black_scholes(&BSInputs { spot, strike, vol: sigma, t, r, is_call });
+        let bs = black_scholes(&BSInputs {
+            spot,
+            strike,
+            vol: sigma,
+            t,
+            r,
+            is_call,
+        });
         let diff = bs.premium - market_price;
-        if diff.abs() < 1e-6 { return Some(sigma); }
-        if bs.vega.abs() < 1e-10 { break; }
+        if diff.abs() < 1e-6 {
+            return Some(sigma);
+        }
+        if bs.vega.abs() < 1e-10 {
+            break;
+        }
         sigma -= diff / (bs.vega * 100.0); // vega is per 1%, need per unit
         sigma = sigma.clamp(0.001, 10.0);
     }
@@ -184,7 +243,7 @@ impl AppState {
         prices.insert("SOL".into(), 182.45);
 
         let mut vols = std::collections::HashMap::new();
-        vols.insert("XLM".into(), 0.82);  // 82% ann vol
+        vols.insert("XLM".into(), 0.82); // 82% ann vol
         vols.insert("BTC".into(), 0.65);
         vols.insert("ETH".into(), 0.72);
         vols.insert("SOL".into(), 0.91);
@@ -207,7 +266,7 @@ pub struct PriceQuery {
     pub underlying: String,
     pub strike: f64,
     pub expiry_days: f64,
-    pub option_type: String,   // "call" | "put"
+    pub option_type: String, // "call" | "put"
 }
 
 #[derive(Deserialize)]
@@ -215,7 +274,7 @@ pub struct IvQuery {
     pub underlying: String,
     pub strike: f64,
     pub expiry_days: f64,
-    pub option_type: String,   // "call" | "put"
+    pub option_type: String, // "call" | "put"
     pub market_price: f64,
 }
 
@@ -284,7 +343,7 @@ async fn health(State(state): State<AppState>) -> Result<Json<serde_json::Value>
 
 async fn get_spot(State(state): State<AppState>) -> Json<SpotResponse> {
     let prices = state.spot_prices.lock().unwrap().clone();
-    let vols   = state.vol_surface.lock().unwrap().clone();
+    let vols = state.vol_surface.lock().unwrap().clone();
     Json(SpotResponse { prices, vols })
 }
 
@@ -293,7 +352,7 @@ async fn price_option(
     Query(q): Query<PriceQuery>,
 ) -> Result<Json<BSResult>, StatusCode> {
     let prices = state.spot_prices.lock().unwrap();
-    let vols   = state.vol_surface.lock().unwrap();
+    let vols = state.vol_surface.lock().unwrap();
 
     let spot = *prices.get(&q.underlying).ok_or(StatusCode::NOT_FOUND)?;
     let base_vol = *vols.get(&q.underlying).ok_or(StatusCode::NOT_FOUND)?;
@@ -302,7 +361,14 @@ async fn price_option(
     let t = q.expiry_days / 365.0;
     let is_call = q.option_type.to_lowercase() == "call";
 
-    let result = black_scholes(&BSInputs { spot, strike: q.strike, vol, t, r: 0.05, is_call });
+    let result = black_scholes(&BSInputs {
+        spot,
+        strike: q.strike,
+        vol,
+        t,
+        r: 0.05,
+        is_call,
+    });
     Ok(Json(result))
 }
 
@@ -311,36 +377,52 @@ async fn get_chain(
     Query(q): Query<ChainQuery>,
 ) -> Result<Json<Vec<OptionChainEntry>>, StatusCode> {
     let prices = state.spot_prices.lock().unwrap();
-    let vols   = state.vol_surface.lock().unwrap();
+    let vols = state.vol_surface.lock().unwrap();
 
     let spot = *prices.get(&q.underlying).ok_or(StatusCode::NOT_FOUND)?;
     let base_vol = *vols.get(&q.underlying).ok_or(StatusCode::NOT_FOUND)?;
-    let t    = q.expiry_days / 365.0;
-    let r    = 0.05_f64;
+    let t = q.expiry_days / 365.0;
+    let r = 0.05_f64;
 
     // Generate strikes: ±30% from spot in 5% increments
     let step_count = 7;
-    let step_pct   = 0.05_f64;
-    let mut chain  = Vec::new();
+    let step_pct = 0.05_f64;
+    let mut chain = Vec::new();
 
     for i in -step_count..=step_count {
         // Round to 4dp, not 2 — 2dp collapses several adjacent strikes to
         // the same value for a sub-$1 asset like XLM (spot ~0.118).
         let strike = (spot * (1.0 + i as f64 * step_pct) * 10000.0).round() / 10000.0;
-        if strike <= 0.0 { continue; }
+        if strike <= 0.0 {
+            continue;
+        }
 
         let vol = smile_vol(base_vol, strike / spot);
-        let call_inputs = BSInputs { spot, strike, vol, t, r, is_call: true };
-        let put_inputs  = BSInputs { spot, strike, vol, t, r, is_call: false };
+        let call_inputs = BSInputs {
+            spot,
+            strike,
+            vol,
+            t,
+            r,
+            is_call: true,
+        };
+        let put_inputs = BSInputs {
+            spot,
+            strike,
+            vol,
+            t,
+            r,
+            is_call: false,
+        };
 
         let call = black_scholes(&call_inputs);
-        let put  = black_scholes(&put_inputs);
+        let put = black_scholes(&put_inputs);
 
         chain.push(OptionChainEntry {
             strike,
             expiry_days: q.expiry_days,
             is_itm_call: spot > strike,
-            is_itm_put:  spot < strike,
+            is_itm_put: spot < strike,
             call,
             put,
         });
@@ -370,10 +452,10 @@ async fn get_expiry_calendar(
     Path(underlying): Path<String>,
 ) -> Result<Json<ExpiryCalendar>, StatusCode> {
     let prices = state.spot_prices.lock().unwrap();
-    let vols   = state.vol_surface.lock().unwrap();
+    let vols = state.vol_surface.lock().unwrap();
 
     let spot = *prices.get(&underlying).ok_or(StatusCode::NOT_FOUND)?;
-    let vol  = *vols.get(&underlying).ok_or(StatusCode::NOT_FOUND)?;
+    let vol = *vols.get(&underlying).ok_or(StatusCode::NOT_FOUND)?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -389,7 +471,12 @@ async fn get_expiry_calendar(
         })
         .collect();
 
-    Ok(Json(ExpiryCalendar { underlying, spot, vol, expiries }))
+    Ok(Json(ExpiryCalendar {
+        underlying,
+        spot,
+        vol,
+        expiries,
+    }))
 }
 
 async fn get_protocol_stats(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -425,7 +512,8 @@ pub fn init_tracing() {
 /// simulator) against it.
 pub async fn init_state() -> AppState {
     dotenvy::dotenv().ok();
-    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite://zenith.db".to_string());
+    let database_url =
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite://zenith.db".to_string());
     let pool = db::init_pool(&database_url).await;
 
     let state = AppState::new(pool);
@@ -447,7 +535,9 @@ pub async fn init_state() -> AppState {
 /// trade-off for a paper-trading demo, not something to ship as-is
 /// behind a real reverse proxy without switching to SmartIpKeyExtractor.
 fn auth_rate_limited_routes() -> Router<AppState> {
-    use tower_governor::{governor::GovernorConfigBuilder, key_extractor::GlobalKeyExtractor, GovernorLayer};
+    use tower_governor::{
+        governor::GovernorConfigBuilder, key_extractor::GlobalKeyExtractor, GovernorLayer,
+    };
 
     let config = Arc::new(
         GovernorConfigBuilder::default()
@@ -483,23 +573,38 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/account", get(positions::get_account))
         .route("/api/v1/positions", get(positions::list_positions))
         .route("/api/v1/positions/open", post(positions::open_position))
-        .route("/api/v1/positions/:id/close", post(positions::close_position))
+        .route(
+            "/api/v1/positions/:id/close",
+            post(positions::close_position),
+        )
         .route("/api/v1/positions/:id/roll", post(positions::roll_position))
         .route("/api/v1/history", get(history::get_history))
         .route(
             "/api/v1/watchlist",
             get(watchlist::get_watchlist).post(watchlist::add_watchlist),
         )
-        .route("/api/v1/watchlist/:underlying", axum::routing::delete(watchlist::remove_watchlist))
+        .route(
+            "/api/v1/watchlist/:underlying",
+            axum::routing::delete(watchlist::remove_watchlist),
+        )
         .route(
             "/api/v1/alerts",
             get(alerts::get_alerts).post(alerts::create_alert),
         )
-        .route("/api/v1/alerts/:id", axum::routing::delete(alerts::delete_alert))
+        .route(
+            "/api/v1/alerts/:id",
+            axum::routing::delete(alerts::delete_alert),
+        )
         .route("/api/v1/ws/spot", get(prices::ws_spot))
         .route("/api/v1/portfolio/payoff", post(payoff::post_payoff))
-        .route("/api/v1/portfolio/greeks", get(positions::get_portfolio_greeks))
-        .route("/api/v1/strategies/execute", post(strategies::execute_strategy))
+        .route(
+            "/api/v1/portfolio/greeks",
+            get(positions::get_portfolio_greeks),
+        )
+        .route(
+            "/api/v1/strategies/execute",
+            post(strategies::execute_strategy),
+        )
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)
@@ -510,7 +615,9 @@ pub fn build_router(state: AppState) -> Router {
 /// on a container stop/redeploy.
 pub async fn shutdown_signal() {
     let ctrl_c = async {
-        tokio::signal::ctrl_c().await.expect("failed to install Ctrl+C handler");
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
     };
 
     #[cfg(unix)]
@@ -551,7 +658,15 @@ mod tests {
         let r = 0.05;
         let true_vol = 0.65;
 
-        let price = black_scholes(&BSInputs { spot, strike, vol: true_vol, t, r, is_call: true }).premium;
+        let price = black_scholes(&BSInputs {
+            spot,
+            strike,
+            vol: true_vol,
+            t,
+            r,
+            is_call: true,
+        })
+        .premium;
         let recovered = implied_vol(price, spot, strike, t, r, true).unwrap();
 
         assert!((recovered - true_vol).abs() < 1e-4);

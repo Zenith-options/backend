@@ -12,13 +12,12 @@ pub async fn get_alerts(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
 ) -> Result<Json<Vec<Alert>>, AppError> {
-    let alerts: Vec<Alert> = sqlx::query_as(
-        "SELECT * FROM alerts WHERE wallet_address = ? ORDER BY created_at DESC",
-    )
-    .bind(&wallet_address)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let alerts: Vec<Alert> =
+        sqlx::query_as("SELECT * FROM alerts WHERE wallet_address = ? ORDER BY created_at DESC")
+            .bind(&wallet_address)
+            .fetch_all(&state.db)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(alerts))
 }
@@ -36,13 +35,27 @@ pub async fn create_alert(
     Json(req): Json<CreateAlertRequest>,
 ) -> Result<Json<Alert>, AppError> {
     if req.condition != "above" && req.condition != "below" {
-        return Err(AppError::new(StatusCode::BAD_REQUEST, "condition must be \"above\" or \"below\""));
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "condition must be \"above\" or \"below\"",
+        ));
     }
     if req.target_price <= 0.0 {
-        return Err(AppError::new(StatusCode::BAD_REQUEST, "target_price must be positive"));
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "target_price must be positive",
+        ));
     }
-    if !state.spot_prices.lock().unwrap().contains_key(&req.underlying) {
-        return Err(AppError::new(StatusCode::NOT_FOUND, format!("unknown underlying \"{}\"", req.underlying)));
+    if !state
+        .spot_prices
+        .lock()
+        .unwrap()
+        .contains_key(&req.underlying)
+    {
+        return Err(AppError::new(
+            StatusCode::NOT_FOUND,
+            format!("unknown underlying \"{}\"", req.underlying),
+        ));
     }
 
     let id = uuid::Uuid::new_v4().to_string();
@@ -81,7 +94,10 @@ pub async fn delete_alert(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if result.rows_affected() == 0 {
-        return Err(AppError::new(StatusCode::NOT_FOUND, "no alert with that id for this wallet"));
+        return Err(AppError::new(
+            StatusCode::NOT_FOUND,
+            "no alert with that id for this wallet",
+        ));
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -114,7 +130,12 @@ pub async fn check_alerts_loop(state: AppState) {
 
             match result {
                 Ok(r) if r.rows_affected() > 0 => {
-                    tracing::info!(underlying, spot, fired = r.rows_affected(), "alerts triggered");
+                    tracing::info!(
+                        underlying,
+                        spot,
+                        fired = r.rows_affected(),
+                        "alerts triggered"
+                    );
                 }
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error = %e, "alert check failed"),

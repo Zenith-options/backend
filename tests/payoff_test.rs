@@ -28,14 +28,20 @@ async fn straddle_payoff_is_symmetric_v_shape() {
     // -10 lands precisely on the strike (spot = 100, the middle point).
     assert_eq!(points[2]["spot"].as_f64().unwrap(), 100.0);
     assert_eq!(points[2]["pnl"].as_f64().unwrap(), -10.0);
-    assert_eq!(points[0]["pnl"].as_f64().unwrap(), points[4]["pnl"].as_f64().unwrap());
+    assert_eq!(
+        points[0]["pnl"].as_f64().unwrap(),
+        points[4]["pnl"].as_f64().unwrap()
+    );
 }
 
 #[tokio::test]
 async fn payoff_rejects_empty_legs() {
     let app = TestApp::spawn().await;
     let (status, _) = app
-        .post("/api/v1/portfolio/payoff", serde_json::json!({ "legs": [], "lo_spot": 1, "hi_spot": 2 }))
+        .post(
+            "/api/v1/portfolio/payoff",
+            serde_json::json!({ "legs": [], "lo_spot": 1, "hi_spot": 2 }),
+        )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }

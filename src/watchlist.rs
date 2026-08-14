@@ -12,13 +12,12 @@ pub async fn get_watchlist(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
 ) -> Result<Json<Vec<WatchlistItem>>, AppError> {
-    let items: Vec<WatchlistItem> = sqlx::query_as(
-        "SELECT * FROM watchlist WHERE wallet_address = ? ORDER BY added_at DESC",
-    )
-    .bind(&wallet_address)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let items: Vec<WatchlistItem> =
+        sqlx::query_as("SELECT * FROM watchlist WHERE wallet_address = ? ORDER BY added_at DESC")
+            .bind(&wallet_address)
+            .fetch_all(&state.db)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(items))
 }
@@ -33,8 +32,16 @@ pub async fn add_watchlist(
     AuthUser(wallet_address): AuthUser,
     Json(req): Json<AddWatchlistRequest>,
 ) -> Result<StatusCode, AppError> {
-    if !state.spot_prices.lock().unwrap().contains_key(&req.underlying) {
-        return Err(AppError::new(StatusCode::NOT_FOUND, format!("unknown underlying \"{}\"", req.underlying)));
+    if !state
+        .spot_prices
+        .lock()
+        .unwrap()
+        .contains_key(&req.underlying)
+    {
+        return Err(AppError::new(
+            StatusCode::NOT_FOUND,
+            format!("unknown underlying \"{}\"", req.underlying),
+        ));
     }
 
     sqlx::query(
@@ -63,7 +70,10 @@ pub async fn remove_watchlist(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if result.rows_affected() == 0 {
-        return Err(AppError::new(StatusCode::NOT_FOUND, format!("\"{underlying}\" is not on this wallet's watchlist")));
+        return Err(AppError::new(
+            StatusCode::NOT_FOUND,
+            format!("\"{underlying}\" is not on this wallet's watchlist"),
+        ));
     }
 
     Ok(StatusCode::NO_CONTENT)

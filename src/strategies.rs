@@ -26,11 +26,18 @@ pub async fn execute_strategy(
     if req.legs.len() < 2 {
         // A single "strategy" leg is just a plain open — use
         // /api/v1/positions/open for that instead.
-        return Err(AppError::new(StatusCode::BAD_REQUEST, "a strategy needs at least 2 legs; use /api/v1/positions/open for a single leg"));
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "a strategy needs at least 2 legs; use /api/v1/positions/open for a single leg",
+        ));
     }
 
     let strategy_id = uuid::Uuid::new_v4().to_string();
-    let mut tx = state.db.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut opened = Vec::with_capacity(req.legs.len());
     for leg in &req.legs {
@@ -39,6 +46,8 @@ pub async fn execute_strategy(
         opened.push(position);
     }
 
-    tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    tx.commit()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(opened))
 }
