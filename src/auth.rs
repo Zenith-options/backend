@@ -265,7 +265,11 @@ pub async fn cleanup_expired_loop(db: sqlx::SqlitePool) {
 
         match sweep_expired(&db).await {
             Ok((n, s)) if n > 0 || s > 0 => {
-                tracing::info!(expired_nonces = n, expired_sessions = s, "swept expired auth rows");
+                tracing::info!(
+                    expired_nonces = n,
+                    expired_sessions = s,
+                    "swept expired auth rows"
+                );
             }
             Ok(_) => {}
             Err(e) => {
@@ -280,7 +284,8 @@ mod tests {
     use super::*;
 
     async fn test_db() -> (sqlx::SqlitePool, std::path::PathBuf) {
-        let db_path = std::env::temp_dir().join(format!("zenith-auth-test-{}.db", uuid::Uuid::new_v4()));
+        let db_path =
+            std::env::temp_dir().join(format!("zenith-auth-test-{}.db", uuid::Uuid::new_v4()));
         let pool = crate::db::init_pool(&format!("sqlite://{}", db_path.display())).await;
         (pool, db_path)
     }
@@ -292,35 +297,43 @@ mod tests {
         let past = format_unix_secs(now_unix() - 3600);
         let future = format_unix_secs(now_unix() + 3600);
 
-        sqlx::query("INSERT INTO auth_nonces (nonce, wallet_address, expires_at) VALUES (?, 'GTEST', ?)")
-            .bind("expired-nonce")
-            .bind(&past)
-            .execute(&db)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO auth_nonces (nonce, wallet_address, expires_at) VALUES (?, 'GTEST', ?)")
-            .bind("live-nonce")
-            .bind(&future)
-            .execute(&db)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO auth_nonces (nonce, wallet_address, expires_at) VALUES (?, 'GTEST', ?)",
+        )
+        .bind("expired-nonce")
+        .bind(&past)
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auth_nonces (nonce, wallet_address, expires_at) VALUES (?, 'GTEST', ?)",
+        )
+        .bind("live-nonce")
+        .bind(&future)
+        .execute(&db)
+        .await
+        .unwrap();
 
         sqlx::query("INSERT INTO accounts (wallet_address) VALUES ('GTEST')")
             .execute(&db)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO sessions (token, wallet_address, expires_at) VALUES (?, 'GTEST', ?)")
-            .bind("expired-session")
-            .bind(&past)
-            .execute(&db)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO sessions (token, wallet_address, expires_at) VALUES (?, 'GTEST', ?)")
-            .bind("live-session")
-            .bind(&future)
-            .execute(&db)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions (token, wallet_address, expires_at) VALUES (?, 'GTEST', ?)",
+        )
+        .bind("expired-session")
+        .bind(&past)
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions (token, wallet_address, expires_at) VALUES (?, 'GTEST', ?)",
+        )
+        .bind("live-session")
+        .bind(&future)
+        .execute(&db)
+        .await
+        .unwrap();
 
         let (expired_nonces, expired_sessions) = sweep_expired(&db).await.unwrap();
         assert_eq!(expired_nonces, 1);

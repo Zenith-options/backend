@@ -17,7 +17,8 @@ pub fn tick_once(state: &AppState) -> String {
     let prices = {
         let mut prices = state.spot_prices.lock().unwrap();
         for price in prices.values_mut() {
-            let pct_move = rand::thread_rng().gen_range(-MAX_PCT_MOVE_PER_TICK..MAX_PCT_MOVE_PER_TICK);
+            let pct_move =
+                rand::thread_rng().gen_range(-MAX_PCT_MOVE_PER_TICK..MAX_PCT_MOVE_PER_TICK);
             *price = (*price * (1.0 + pct_move)).max(0.0001);
         }
         prices.clone()
@@ -89,7 +90,8 @@ mod tests {
     use super::*;
 
     async fn test_state() -> (AppState, std::path::PathBuf) {
-        let db_path = std::env::temp_dir().join(format!("zenith-prices-test-{}.db", uuid::Uuid::new_v4()));
+        let db_path =
+            std::env::temp_dir().join(format!("zenith-prices-test-{}.db", uuid::Uuid::new_v4()));
         let pool = crate::db::init_pool(&format!("sqlite://{}", db_path.display())).await;
         (AppState::new(pool), db_path)
     }
@@ -118,7 +120,11 @@ mod tests {
     #[tokio::test]
     async fn tick_once_never_lets_a_price_reach_zero_or_go_negative() {
         let (state, db_path) = test_state().await;
-        state.spot_prices.lock().unwrap().insert("TINY".into(), 0.0001);
+        state
+            .spot_prices
+            .lock()
+            .unwrap()
+            .insert("TINY".into(), 0.0001);
 
         // Enough ticks that a run of unlucky downward moves would drive an
         // unclamped price to zero or below if the floor weren't enforced.

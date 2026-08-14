@@ -127,7 +127,12 @@ pub async fn check_once(state: &AppState) -> u64 {
 
         match result {
             Ok(r) if r.rows_affected() > 0 => {
-                tracing::info!(underlying, spot, fired = r.rows_affected(), "alerts triggered");
+                tracing::info!(
+                    underlying,
+                    spot,
+                    fired = r.rows_affected(),
+                    "alerts triggered"
+                );
                 total_fired += r.rows_affected();
             }
             Ok(_) => {}
@@ -153,16 +158,25 @@ mod tests {
     use super::*;
 
     async fn test_state() -> (AppState, std::path::PathBuf) {
-        let db_path = std::env::temp_dir().join(format!("zenith-alerts-test-{}.db", uuid::Uuid::new_v4()));
+        let db_path =
+            std::env::temp_dir().join(format!("zenith-alerts-test-{}.db", uuid::Uuid::new_v4()));
         let pool = crate::db::init_pool(&format!("sqlite://{}", db_path.display())).await;
         (AppState::new(pool), db_path)
     }
 
-    async fn insert_alert(state: &AppState, id: &str, underlying: &str, condition: &str, target: f64) {
-        sqlx::query("INSERT INTO accounts (wallet_address) VALUES ('GTEST') ON CONFLICT DO NOTHING")
-            .execute(&state.db)
-            .await
-            .unwrap();
+    async fn insert_alert(
+        state: &AppState,
+        id: &str,
+        underlying: &str,
+        condition: &str,
+        target: f64,
+    ) {
+        sqlx::query(
+            "INSERT INTO accounts (wallet_address) VALUES ('GTEST') ON CONFLICT DO NOTHING",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
         sqlx::query(
             "INSERT INTO alerts (id, wallet_address, underlying, condition, target_price)
              VALUES (?, 'GTEST', ?, ?, ?)",
@@ -179,7 +193,11 @@ mod tests {
     #[tokio::test]
     async fn check_once_fires_an_alert_whose_condition_is_met() {
         let (state, db_path) = test_state().await;
-        state.spot_prices.lock().unwrap().insert("BTC".into(), 70_000.0);
+        state
+            .spot_prices
+            .lock()
+            .unwrap()
+            .insert("BTC".into(), 70_000.0);
         insert_alert(&state, "a1", "BTC", "above", 65_000.0).await;
 
         let fired = check_once(&state).await;
@@ -198,7 +216,11 @@ mod tests {
     #[tokio::test]
     async fn check_once_leaves_an_unmet_alert_untouched() {
         let (state, db_path) = test_state().await;
-        state.spot_prices.lock().unwrap().insert("BTC".into(), 50_000.0);
+        state
+            .spot_prices
+            .lock()
+            .unwrap()
+            .insert("BTC".into(), 50_000.0);
         insert_alert(&state, "a1", "BTC", "above", 65_000.0).await;
 
         let fired = check_once(&state).await;
@@ -217,7 +239,11 @@ mod tests {
     #[tokio::test]
     async fn check_once_does_not_re_fire_an_already_triggered_alert() {
         let (state, db_path) = test_state().await;
-        state.spot_prices.lock().unwrap().insert("BTC".into(), 70_000.0);
+        state
+            .spot_prices
+            .lock()
+            .unwrap()
+            .insert("BTC".into(), 70_000.0);
         insert_alert(&state, "a1", "BTC", "above", 65_000.0).await;
 
         assert_eq!(check_once(&state).await, 1);
