@@ -96,7 +96,7 @@ pub struct VerifyRequest {
     pub signature: String, // base64-encoded 64-byte ed25519 signature
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct VerifyResponse {
     pub token: String,
     pub wallet_address: String,
@@ -406,6 +406,41 @@ mod tests {
         let result = AuthUser::from_request_parts(&mut parts, &state).await;
         let err = result.expect_err("an expired session must not authenticate");
         assert_eq!(err.message, "session expired");
+
+        state.db.close().await;
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    /// Same situation as the expired-session test above: NONCE_TTL_SECS is
+    /// a real 5 minutes, nothing lets a test fast-forward the clock, so
+    /// this inserts an already-expired nonce directly and calls
+    /// post_verify as a plain function. The nonce-expiry check runs
+    /// before any signature verification, so a throwaway signature that
+    /// was never going to be checked is fine here.
+    #[tokio::test]
+    async fn post_verify_rejects_an_expired_nonce() {
+        let (db, db_path) = test_db().await;
+        let state = crate::AppState::new(db);
+
+        let message = "Sign in to Zenith\nNonce: deadbeef";
+        let past = format_unix_secs(now_unix() - 3600);
+        sqlx::query(
+            "INSERT INTO auth_nonces (nonce, wallet_address, expires_at) VALUES (?, 'GTEST', ?)",
+        )
+        .bind(message)
+        .bind(&past)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        let req = VerifyRequest {
+            wallet_address: "GTEST".to_string(),
+            message: message.to_string(),
+            signature: "AA==".to_string(),
+        };
+        let result = post_verify(State(state.clone()), AppJson(req)).await;
+        let err = result.expect_err("an expired nonce must be rejected");
+        assert_eq!(err.message, "nonce expired");
 
         state.db.close().await;
         let _ = std::fs::remove_file(&db_path);
