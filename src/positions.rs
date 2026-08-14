@@ -513,3 +513,52 @@ pub async fn get_portfolio_greeks(
 
     Ok(Json(totals))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Not reachable through the HTTP API at all (nothing lets a caller
+    /// delist an underlying), so this calls get_portfolio_greeks directly
+    /// as a plain function rather than through TestApp/the router — the
+    /// only way to actually exercise the `continue` branch this test is
+    /// aimed at.
+    #[tokio::test]
+    async fn get_portfolio_greeks_skips_a_position_in_a_delisted_underlying() {
+        let db_path =
+            std::env::temp_dir().join(format!("zenith-positions-test-{}.db", uuid::Uuid::new_v4()));
+        let pool = crate::db::init_pool(&format!("sqlite://{}", db_path.display())).await;
+        let state = AppState::new(pool);
+
+        sqlx::query("INSERT INTO accounts (wallet_address) VALUES ('GTEST')")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO positions
+                (id, wallet_address, underlying, strike, expiry_days, option_type,
+                 position_type, contracts, entry_premium, entry_spot, status)
+             VALUES ('p1', 'GTEST', 'RETIRED', 100, 30, 'call', 'long', 1, 5, 100, 'open')",
+        )
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+        // Never listed in spot_prices/vol_surface at all — same situation
+        // as an underlying that existed when the position opened and was
+        // delisted since.
+        assert!(!state.spot_prices.lock().unwrap().contains_key("RETIRED"));
+
+        let greeks = get_portfolio_greeks(State(state.clone()), AuthUser("GTEST".into()))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(greeks.delta, 0.0);
+        assert_eq!(greeks.gamma, 0.0);
+        assert_eq!(greeks.theta, 0.0);
+        assert_eq!(greeks.vega, 0.0);
+
+        state.db.close().await;
+        let _ = std::fs::remove_file(&db_path);
+    }
+}

@@ -12,6 +12,7 @@ use serde_json::json;
 /// non-positive strike?). Existing handlers keep working unchanged since
 /// this converts `From<StatusCode>`; converting them to attach a real
 /// message is a per-module follow-up, not required to introduce the type.
+#[derive(Debug)]
 pub struct AppError {
     pub status: StatusCode,
     pub message: String,
