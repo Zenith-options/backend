@@ -33,12 +33,19 @@ pub async fn get_account(
     Ok(Json(account))
 }
 
+pub const DEFAULT_LIST_LIMIT: i64 = 50;
+pub const MAX_LIST_LIMIT: i64 = 200;
+
 #[derive(Deserialize)]
 pub struct ListPositionsQuery {
     /// "open" | "closed" | "rolled" — omit to return every status.
     pub status: Option<String>,
     /// Restrict to the legs of one multi-leg strategy — omit for everything.
     pub strategy_id: Option<String>,
+    /// Defaults to DEFAULT_LIST_LIMIT, capped at MAX_LIST_LIMIT regardless
+    /// of what the caller asks for.
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
 }
 
 pub async fn list_positions(
@@ -46,6 +53,12 @@ pub async fn list_positions(
     AuthUser(wallet_address): AuthUser,
     Query(q): Query<ListPositionsQuery>,
 ) -> Result<Json<Vec<Position>>, AppError> {
+    let limit = q
+        .limit
+        .unwrap_or(DEFAULT_LIST_LIMIT)
+        .clamp(1, MAX_LIST_LIMIT);
+    let offset = q.offset.unwrap_or(0).max(0);
+
     // `? IS NULL OR column = ?` lets one query handle all four
     // status/strategy_id filter combinations without branching SQL.
     let positions: Vec<Position> = sqlx::query_as(
@@ -53,13 +66,16 @@ pub async fn list_positions(
             WHERE wallet_address = ?
               AND (? IS NULL OR status = ?)
               AND (? IS NULL OR strategy_id = ?)
-         ORDER BY opened_at DESC",
+         ORDER BY opened_at DESC
+         LIMIT ? OFFSET ?",
     )
     .bind(&wallet_address)
     .bind(&q.status)
     .bind(&q.status)
     .bind(&q.strategy_id)
     .bind(&q.strategy_id)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&state.db)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
