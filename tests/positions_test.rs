@@ -314,3 +314,41 @@ async fn list_positions_reports_total_count_and_has_more_via_headers() {
     assert_eq!(headers_last_page.get("x-total-count").unwrap(), "3");
     assert_eq!(headers_last_page.get("x-has-more").unwrap(), "false");
 }
+
+#[tokio::test]
+async fn roll_rejects_a_non_positive_new_strike() {
+    let app = TestApp::spawn().await;
+    let token = app.login().await;
+
+    let (_, opened) = app
+        .post_with(
+            "/api/v1/positions/open",
+            serde_json::json!({
+                "underlying": "XLM", "strike": 0.13, "expiry_days": 30,
+                "option_type": "call", "position_type": "short", "contracts": 100
+            }),
+            Some(&token),
+        )
+        .await;
+    let id = opened["id"].as_str().unwrap();
+
+    // roll_position reuses open_position_in_tx's own validation for the
+    // replacement leg's parameters — this wasn't tested at all before,
+    // even though it's real, reachable behavior (not just an assumption
+    // that open_position's checks "probably" cover roll too).
+    let (status, _) = app
+        .post_with(
+            &format!("/api/v1/positions/{id}/roll"),
+            serde_json::json!({ "new_strike": 0, "new_expiry_days": 30 }),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // The original leg must not have been touched by a roll that failed
+    // on its replacement leg's own validation.
+    let (_, still_open) = app
+        .get_with("/api/v1/positions?status=open", Some(&token))
+        .await;
+    assert_eq!(still_open.as_array().unwrap().len(), 1);
+}
