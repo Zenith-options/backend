@@ -364,13 +364,13 @@ async fn close_position_in_tx(
     .bind(position_id)
     .execute(&mut **tx)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| db_error("mark position closed", e))?;
 
     let closed: Position = sqlx::query_as("SELECT * FROM positions WHERE id = ?")
         .bind(position_id)
         .fetch_one(&mut **tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("load the position just closed", e))?;
 
     Ok(closed)
 }
@@ -384,11 +384,11 @@ pub async fn close_position(
         .db
         .begin()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("begin close-position transaction", e))?;
     let closed = close_position_in_tx(&mut tx, &state, &wallet_address, &id).await?;
     tx.commit()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("commit close-position transaction", e))?;
     Ok(Json(closed))
 }
 
@@ -417,7 +417,7 @@ pub async fn roll_position(
         .db
         .begin()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("begin roll transaction", e))?;
 
     let mut closed = close_position_in_tx(&mut tx, &state, &wallet_address, &id).await?;
     // close_position_in_tx always marks the row 'closed'; a roll is
@@ -427,7 +427,7 @@ pub async fn roll_position(
         .bind(&closed.id)
         .execute(&mut *tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("mark position rolled", e))?;
     closed.status = "rolled".to_string();
 
     let open_req = OpenPositionRequest {
@@ -451,7 +451,7 @@ pub async fn roll_position(
 
     tx.commit()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| db_error("commit roll transaction", e))?;
     Ok(Json(RollResult { closed, opened }))
 }
 
@@ -475,7 +475,7 @@ pub async fn get_portfolio_greeks(
             .bind(&wallet_address)
             .fetch_all(&state.db)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|e| db_error("load open positions for greeks", e))?;
 
     let mut totals = AggregateGreeks::default();
     for p in &open_positions {
