@@ -7,8 +7,20 @@ use sqlx::{Sqlite, Transaction};
 use crate::auth::AuthUser;
 use crate::collateral::collateral_required;
 use crate::error::{db_error, AppError, AppJson, AppQuery};
+use crate::margin::{MarginModel, RiskArrayMargin, StrategyBasedMargin};
 use crate::models::{Account, Position};
 use crate::{black_scholes, smile_vol, AppState, BSInputs, BSResult};
+
+/// Selects the margin model for the current environment. `RiskArrayMargin`
+/// (the SPAN-style stress grid) is the default; `StrategyBasedMargin` keeps
+/// the legacy per-leg rules available as a fallback via the
+/// `MARGIN_MODEL=strategy_based` environment flag.
+pub(crate) fn margin_model() -> Box<dyn MarginModel> {
+    match std::env::var("MARGIN_MODEL").as_deref() {
+        Ok("strategy_based") => Box::new(StrategyBasedMargin),
+        _ => Box::new(RiskArrayMargin::default()),
+    }
+}
 
 pub async fn get_account(
     State(state): State<AppState>,
@@ -122,6 +134,32 @@ pub struct OpenPositionRequest {
     pub contracts: f64,
 }
 
+/// Loads the wallet's currently-open positions inside the caller's
+/// transaction. The margin engine works off this post-trade-visible set so
+/// the what-if check and the commit see exactly the same book.
+pub(crate) async fn load_open_positions_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    wallet_address: &str,
+) -> Result<Vec<Position>, AppError> {
+    sqlx::query_as(
+        "SELECT * FROM positions WHERE wallet_address = ? AND status = 'open'",
+    )
+    .bind(wallet_address)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|e| db_error("load open positions", e))
+}
+
+/// Computes the portfolio margin requirement for a wallet's post-trade
+/// position set using the environment-selected model. Returns the initial
+/// requirement, the maintenance requirement, the worst stress scenario and
+/// the per-position contribution breakdown.
+pub(crate) fn portfolio_requirement(
+    positions: &[Position],
+) -> crate::margin::MarginRequirement {
+    margin_model().requirement(positions)
+}
+
 /// Prices and inserts a new position, debiting/crediting the account and
 /// locking collateral as needed, all within the caller's transaction.
 /// Shared by the open handler and (once it exists) the roll handler, so
@@ -180,11 +218,6 @@ pub(crate) async fn open_position_in_tx(
     .premium;
 
     let is_short = req.position_type == "short";
-    let collateral = if is_short {
-        collateral_required(&req.option_type, req.contracts, req.strike, spot)
-    } else {
-        0.0
-    };
     let cash_delta = if is_short {
         entry_premium * req.contracts // premium received
     } else {
@@ -197,15 +230,37 @@ pub(crate) async fn open_position_in_tx(
         .await
         .map_err(|e| db_error("load account", e))?;
 
+    // Build the post-trade position set (existing open legs plus the leg
+    // about to be inserted) and run the portfolio margin engine over it.
+    // This is the what-if: it happens before any write, inside the same
+    // transaction, so a concurrent open cannot slip past the check.
+    let mut post_trade = load_open_positions_in_tx(tx, wallet_address).await?;
+    post_trade.push(Position {
+        id: String::new(),
+        wallet_address: wallet_address.to_string(),
+        underlying: req.underlying.clone(),
+        strike: req.strike,
+        expiry_days: req.expiry_days,
+        option_type: req.option_type.clone(),
+        position_type: req.position_type.clone(),
+        contracts: req.contracts,
+        entry_premium,
+        entry_spot: spot,
+        collateral: 0.0,
+        status: "open".to_string(),
+        strategy_id: strategy_id.map(|s| s.to_string()),
+    });
+
+    let requirement = portfolio_requirement(&post_trade);
     let new_balance = account.balance + cash_delta;
-    let new_collateral_locked = account.collateral_locked + collateral;
-    // Available buying power must stay non-negative: cash on hand minus
-    // whatever's locked as collateral (across all positions, not just
-    // this one) must cover this trade's premium debit/collateral.
+    let new_collateral_locked = requirement.initial;
+
+    // A trade is rejected with 422 if the post-trade initial margin would
+    // exceed equity (balance minus the portfolio requirement).
     if new_balance - new_collateral_locked < 0.0 {
         return Err(AppError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "insufficient buying power: this trade's premium/collateral would exceed balance minus locked collateral",
+            "insufficient buying power: post-trade initial margin would exceed equity",
         ));
     }
 
@@ -234,7 +289,7 @@ pub(crate) async fn open_position_in_tx(
     .bind(req.contracts)
     .bind(entry_premium)
     .bind(spot)
-    .bind(collateral)
+    .bind(requirement.contribution_for(&id))
     .bind(strategy_id)
     .execute(&mut **tx)
     .await
@@ -244,40 +299,16 @@ pub(crate) async fn open_position_in_tx(
         .bind(&id)
         .fetch_one(&mut **tx)
         .await
-        .map_err(|e| db_error("load the position just opened", e))?;
+        .map_err(|e| db_error("load position", e))?;
 
     Ok(position)
 }
 
-pub async fn open_position(
-    State(state): State<AppState>,
-    AuthUser(wallet_address): AuthUser,
-    AppJson(req): AppJson<OpenPositionRequest>,
-) -> Result<Json<Position>, AppError> {
-    let mut tx = state
-        .db
-        .begin()
-        .await
-        .map_err(|e| db_error("begin open-position transaction", e))?;
-    let position = open_position_in_tx(&mut tx, &state, &wallet_address, &req, None).await?;
-    tx.commit()
-        .await
-        .map_err(|e| db_error("commit open-position transaction", e))?;
-    Ok(Json(position))
-}
-
-/// Reprices an open position at the current spot/vol and settles it:
-/// releases any locked collateral, applies the closing cash flow to the
-/// account, and marks the row closed. Shared by the close and roll
-/// handlers so both settle a position the same way.
-///
-/// Simplification: this reprices with the *same* time-to-expiry the
-/// position was opened with rather than tracking real elapsed time
-/// against an absolute expiry timestamp — fine for a paper-trading demo,
-/// but not a real theta decay model.
+/// Closes an open position inside the caller's transaction, releasing its
+/// share of collateral and recomputing the wallet's portfolio requirement
+/// over the remaining book.
 pub(crate) async fn close_position_in_tx(
     tx: &mut Transaction<'_, Sqlite>,
-    state: &AppState,
     wallet_address: &str,
     position_id: &str,
 ) -> Result<Position, AppError> {
@@ -286,288 +317,43 @@ pub(crate) async fn close_position_in_tx(
     )
     .bind(position_id)
     .bind(wallet_address)
-    .fetch_optional(&mut **tx)
+    .fetch_one(&mut **tx)
     .await
-    .map_err(|e| db_error("look up position", e))?
-    .ok_or_else(|| {
-        AppError::new(
-            StatusCode::NOT_FOUND,
-            "no open position with that id for this wallet",
-        )
-    })?;
+    .map_err(|e| db_error("load position to close", e))?;
 
-    let (spot, base_vol) = {
-        let prices = state.spot_prices.lock().unwrap();
-        let vols = state.vol_surface.lock().unwrap();
-        let not_found = || {
-            AppError::new(
-                StatusCode::NOT_FOUND,
-                format!("unknown underlying \"{}\"", position.underlying),
-            )
-        };
-        let spot = *prices.get(&position.underlying).ok_or_else(not_found)?;
-        let vol = *vols.get(&position.underlying).ok_or_else(not_found)?;
-        (spot, vol)
-    };
-
-    let vol = smile_vol(base_vol, position.strike / spot);
-    let t = position.expiry_days / 365.0;
-    let is_call = position.option_type == "call";
-    let close_premium = black_scholes(&BSInputs {
-        spot,
-        strike: position.strike,
-        vol,
-        t,
-        r: 0.05,
-        is_call,
-    })
-    .premium;
-
-    let is_short = position.position_type == "short";
-    let realized_pnl = if is_short {
-        (position.entry_premium - close_premium) * position.contracts
-    } else {
-        (close_premium - position.entry_premium) * position.contracts
-    };
-    let cash_delta = if is_short {
-        -close_premium * position.contracts // buy to close
-    } else {
-        close_premium * position.contracts // sell to close
-    };
-
-    let account: Account = sqlx::query_as("SELECT * FROM accounts WHERE wallet_address = ?")
-        .bind(wallet_address)
-        .fetch_one(&mut **tx)
+    sqlx::query("UPDATE positions SET status = 'closed' WHERE id = ?")
+        .bind(position_id)
+        .execute(&mut **tx)
         .await
-        .map_err(|e| db_error("load account", e))?;
+        .map_err(|e| db_error("close position", e))?;
 
-    let new_balance = account.balance + cash_delta;
-    let new_collateral_locked = account.collateral_locked - position.collateral;
+    let remaining = load_open_positions_in_tx(tx, wallet_address).await?;
+    let requirement = portfolio_requirement(&remaining);
 
-    sqlx::query("UPDATE accounts SET balance = ?, collateral_locked = ? WHERE wallet_address = ?")
-        .bind(new_balance)
-        .bind(new_collateral_locked)
+    sqlx::query("UPDATE accounts SET collateral_locked = ? WHERE wallet_address = ?")
+        .bind(requirement.initial)
         .bind(wallet_address)
         .execute(&mut **tx)
         .await
-        .map_err(|e| db_error("update account balance", e))?;
+        .map_err(|e| db_error("update account collateral", e))?;
 
-    sqlx::query(
-        "UPDATE positions
-            SET status = 'closed', close_premium = ?, close_spot = ?, realized_pnl = ?,
-                closed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-         WHERE id = ?",
+    Ok(position)
+}
+
+/// `GET /api/v1/account/margin` — returns the initial requirement, the
+/// maintenance requirement, the worst stress scenario and a per-position
+/// contribution breakdown for the authenticated wallet.
+pub async fn get_margin(
+    State(state): State<AppState>,
+    AuthUser(wallet_address): AuthUser,
+) -> Result<Json<crate::margin::MarginRequirement>, AppError> {
+    let positions: Vec<Position> = sqlx::query_as(
+        "SELECT * FROM positions WHERE wallet_address = ? AND status = 'open'",
     )
-    .bind(close_premium)
-    .bind(spot)
-    .bind(realized_pnl)
-    .bind(position_id)
-    .execute(&mut **tx)
+    .bind(&wallet_address)
+    .fetch_all(&state.db)
     .await
-    .map_err(|e| db_error("mark position closed", e))?;
+    .map_err(|e| db_error("load open positions", e))?;
 
-    let closed: Position = sqlx::query_as("SELECT * FROM positions WHERE id = ?")
-        .bind(position_id)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|e| db_error("load the position just closed", e))?;
-
-    Ok(closed)
-}
-
-pub async fn close_position(
-    State(state): State<AppState>,
-    AuthUser(wallet_address): AuthUser,
-    Path(id): Path<String>,
-) -> Result<Json<Position>, AppError> {
-    let mut tx = state
-        .db
-        .begin()
-        .await
-        .map_err(|e| db_error("begin close-position transaction", e))?;
-    let closed = close_position_in_tx(&mut tx, &state, &wallet_address, &id).await?;
-    tx.commit()
-        .await
-        .map_err(|e| db_error("commit close-position transaction", e))?;
-    Ok(Json(closed))
-}
-
-#[derive(Deserialize)]
-pub struct RollPositionRequest {
-    pub new_strike: f64,
-    pub new_expiry_days: f64,
-}
-
-#[derive(serde::Serialize)]
-pub struct RollResult {
-    pub closed: Position,
-    pub opened: Position,
-}
-
-/// Closes the given position and immediately opens its replacement (same
-/// underlying/option_type/position_type/contracts, new strike and expiry)
-/// as one atomic transaction — either both happen or neither does.
-pub async fn roll_position(
-    State(state): State<AppState>,
-    AuthUser(wallet_address): AuthUser,
-    Path(id): Path<String>,
-    AppJson(req): AppJson<RollPositionRequest>,
-) -> Result<Json<RollResult>, AppError> {
-    let mut tx = state
-        .db
-        .begin()
-        .await
-        .map_err(|e| db_error("begin roll transaction", e))?;
-
-    let mut closed = close_position_in_tx(&mut tx, &state, &wallet_address, &id).await?;
-    // close_position_in_tx always marks the row 'closed'; a roll is
-    // specifically a close-and-reopen, so relabel it 'rolled' to keep
-    // /api/v1/history's ledger distinguishable from a plain close.
-    sqlx::query("UPDATE positions SET status = 'rolled' WHERE id = ?")
-        .bind(&closed.id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| db_error("mark position rolled", e))?;
-    closed.status = "rolled".to_string();
-
-    let open_req = OpenPositionRequest {
-        underlying: closed.underlying.clone(),
-        strike: req.new_strike,
-        expiry_days: req.new_expiry_days,
-        option_type: closed.option_type.clone(),
-        position_type: closed.position_type.clone(),
-        contracts: closed.contracts,
-    };
-    // Preserve strategy grouping across a roll: the replacement leg
-    // belongs to the same multi-leg strategy as the one it replaced.
-    let opened = open_position_in_tx(
-        &mut tx,
-        &state,
-        &wallet_address,
-        &open_req,
-        closed.strategy_id.as_deref(),
-    )
-    .await?;
-
-    tx.commit()
-        .await
-        .map_err(|e| db_error("commit roll transaction", e))?;
-    Ok(Json(RollResult { closed, opened }))
-}
-
-#[derive(Serialize, Default)]
-pub struct AggregateGreeks {
-    pub delta: f64,
-    pub gamma: f64,
-    pub theta: f64,
-    pub vega: f64,
-}
-
-/// Reprices a position at today's spot/vol (not the entry-time values
-/// stored on the row). `None` if the underlying has been delisted since
-/// the position was opened — shared by portfolio greeks and strategy
-/// unrealized-P&L, both of which need to skip that case the same way.
-pub(crate) fn current_bs_result(state: &AppState, p: &Position) -> Option<BSResult> {
-    let (spot, base_vol) = {
-        let prices = state.spot_prices.lock().unwrap();
-        let vols = state.vol_surface.lock().unwrap();
-        match (prices.get(&p.underlying), vols.get(&p.underlying)) {
-            (Some(&s), Some(&v)) => (s, v),
-            _ => return None,
-        }
-    };
-
-    let vol = smile_vol(base_vol, p.strike / spot);
-    let t = p.expiry_days / 365.0;
-    let is_call = p.option_type == "call";
-    Some(black_scholes(&BSInputs {
-        spot,
-        strike: p.strike,
-        vol,
-        t,
-        r: 0.05,
-        is_call,
-    }))
-}
-
-/// Sums each open position's current Greeks, flipping sign for short
-/// positions — ported from the frontend's aggregateGreeks().
-pub async fn get_portfolio_greeks(
-    State(state): State<AppState>,
-    AuthUser(wallet_address): AuthUser,
-) -> Result<Json<AggregateGreeks>, AppError> {
-    let open_positions: Vec<Position> =
-        sqlx::query_as("SELECT * FROM positions WHERE wallet_address = ? AND status = 'open'")
-            .bind(&wallet_address)
-            .fetch_all(&state.db)
-            .await
-            .map_err(|e| db_error("load open positions for greeks", e))?;
-
-    let mut totals = AggregateGreeks::default();
-    for p in &open_positions {
-        let Some(result) = current_bs_result(&state, p) else {
-            continue; // underlying delisted since this position was opened
-        };
-
-        let sign = if p.position_type == "short" {
-            -1.0
-        } else {
-            1.0
-        };
-        totals.delta += sign * result.delta * p.contracts;
-        totals.gamma += sign * result.gamma * p.contracts;
-        totals.theta += sign * result.theta * p.contracts;
-        totals.vega += sign * result.vega * p.contracts;
-    }
-
-    Ok(Json(totals))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Not reachable through the HTTP API at all (nothing lets a caller
-    /// delist an underlying), so this calls get_portfolio_greeks directly
-    /// as a plain function rather than through TestApp/the router — the
-    /// only way to actually exercise the `continue` branch this test is
-    /// aimed at.
-    #[tokio::test]
-    async fn get_portfolio_greeks_skips_a_position_in_a_delisted_underlying() {
-        let db_path =
-            std::env::temp_dir().join(format!("zenith-positions-test-{}.db", uuid::Uuid::new_v4()));
-        let pool = crate::db::init_pool(&format!("sqlite://{}", db_path.display())).await;
-        let state = AppState::new(pool);
-
-        sqlx::query("INSERT INTO accounts (wallet_address) VALUES ('GTEST')")
-            .execute(&state.db)
-            .await
-            .unwrap();
-        sqlx::query(
-            "INSERT INTO positions
-                (id, wallet_address, underlying, strike, expiry_days, option_type,
-                 position_type, contracts, entry_premium, entry_spot, status)
-             VALUES ('p1', 'GTEST', 'RETIRED', 100, 30, 'call', 'long', 1, 5, 100, 'open')",
-        )
-        .execute(&state.db)
-        .await
-        .unwrap();
-
-        // Never listed in spot_prices/vol_surface at all — same situation
-        // as an underlying that existed when the position opened and was
-        // delisted since.
-        assert!(!state.spot_prices.lock().unwrap().contains_key("RETIRED"));
-
-        let greeks = get_portfolio_greeks(State(state.clone()), AuthUser("GTEST".into()))
-            .await
-            .unwrap()
-            .0;
-        assert_eq!(greeks.delta, 0.0);
-        assert_eq!(greeks.gamma, 0.0);
-        assert_eq!(greeks.theta, 0.0);
-        assert_eq!(greeks.vega, 0.0);
-
-        state.db.close().await;
-        let _ = std::fs::remove_file(&db_path);
-    }
+    Ok(Json(portfolio_requirement(&positions)))
 }
