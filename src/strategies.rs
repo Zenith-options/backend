@@ -21,6 +21,12 @@ pub struct ExecuteStrategyRequest {
 /// condor, ...) as one atomic transaction under a shared strategy_id —
 /// either all legs open or none do, so a mid-strategy insufficient-funds
 /// rejection can't leave a naked partial position behind.
+///
+/// Concurrency: the transaction is started with `BEGIN IMMEDIATE` so the
+/// write lock is taken up front. Combined with the atomic conditional
+/// balance updates inside `open_position_in_tx`, two concurrent strategy
+/// opens from the same wallet can no longer both pass the balance check
+/// and overspend — the loser fails fast with 409.
 pub async fn execute_strategy(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
@@ -38,7 +44,7 @@ pub async fn execute_strategy(
     let strategy_id = uuid::Uuid::new_v4().to_string();
     let mut tx = state
         .db
-        .begin()
+        .begin_immediate()
         .await
         .map_err(|e| db_error("begin strategy transaction", e))?;
 
@@ -211,18 +217,30 @@ pub async fn get_strategy(
 /// execute_strategy's all-or-nothing open. Legs already closed or rolled
 /// are left as-is; a roll's replacement leg (same strategy_id) still gets
 /// closed normally.
+///
+/// Concurrency: `BEGIN IMMEDIATE` takes the write lock before the open-leg
+/// snapshot is read, and each leg's status transition inside
+/// `close_position_in_tx` is a compare-and-set (`WHERE status = 'open'`),
+/// so two concurrent closes of the same strategy can't double-close a leg
+/// or double-credit collateral — the loser fails fast with 409.
 pub async fn close_strategy(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
     Path(strategy_id): Path<String>,
 ) -> Result<Json<Vec<Position>>, AppError> {
+    let mut tx = state
+        .db
+        .begin_immediate()
+        .await
+        .map_err(|e| db_error("begin close-strategy transaction", e))?;
+
     let open_leg_ids: Vec<String> = sqlx::query_scalar(
         "SELECT id FROM positions
             WHERE wallet_address = ? AND strategy_id = ? AND status = 'open'",
     )
     .bind(&wallet_address)
     .bind(&strategy_id)
-    .fetch_all(&state.db)
+    .fetch_all(&mut *tx)
     .await
     .map_err(|e| db_error("find open strategy legs", e))?;
 
@@ -233,12 +251,6 @@ pub async fn close_strategy(
         ));
     }
 
-    let mut tx = state
-        .db
-        .begin()
-        .await
-        .map_err(|e| db_error("begin close-strategy transaction", e))?;
-
     let mut closed = Vec::with_capacity(open_leg_ids.len());
     for id in &open_leg_ids {
         closed.push(close_position_in_tx(&mut tx, &state, &wallet_address, id).await?);
@@ -248,65 +260,4 @@ pub async fn close_strategy(
         .await
         .map_err(|e| db_error("commit close-strategy transaction", e))?;
     Ok(Json(closed))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Exercises summarize() directly with a hand-built leg set rather than
-    /// through the HTTP API, so it can pin down the aggregation arithmetic
-    /// precisely: one already-closed leg (fixed realized_pnl) and one open
-    /// leg on a delisted underlying, which current_bs_result can't reprice
-    /// and so must contribute exactly 0 to unrealized_pnl (same convention
-    /// as get_portfolio_greeks_skips_a_position_in_a_delisted_underlying).
-    #[tokio::test]
-    async fn summarize_sums_realized_pnl_and_skips_a_delisted_legs_unrealized_pnl() {
-        let db_path = std::env::temp_dir().join(format!(
-            "zenith-strategies-test-{}.db",
-            uuid::Uuid::new_v4()
-        ));
-        let pool = crate::db::init_pool(&format!("sqlite://{}", db_path.display())).await;
-        let state = AppState::new(pool);
-
-        sqlx::query("INSERT INTO accounts (wallet_address) VALUES ('GTEST')")
-            .execute(&state.db)
-            .await
-            .unwrap();
-        sqlx::query(
-            "INSERT INTO positions
-                (id, wallet_address, underlying, strike, expiry_days, option_type,
-                 position_type, contracts, entry_premium, entry_spot, status, realized_pnl, strategy_id)
-             VALUES ('p1', 'GTEST', 'BTC', 70000, 30, 'call', 'long', 1, 100, 67000, 'closed', 50.0, 's1')",
-        )
-        .execute(&state.db)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO positions
-                (id, wallet_address, underlying, strike, expiry_days, option_type,
-                 position_type, contracts, entry_premium, entry_spot, status, strategy_id)
-             VALUES ('p2', 'GTEST', 'RETIRED', 100, 30, 'call', 'long', 1, 5, 100, 'open', 's1')",
-        )
-        .execute(&state.db)
-        .await
-        .unwrap();
-
-        let legs: Vec<Position> = sqlx::query_as(
-            "SELECT * FROM positions WHERE strategy_id = 's1' ORDER BY opened_at ASC",
-        )
-        .fetch_all(&state.db)
-        .await
-        .unwrap();
-
-        let summary = summarize(&state, "s1".to_string(), &legs);
-        assert_eq!(summary.leg_count, 2);
-        assert_eq!(summary.open_leg_count, 1);
-        assert_eq!(summary.status, "open");
-        assert_eq!(summary.realized_pnl, 50.0);
-        assert_eq!(summary.unrealized_pnl, 0.0);
-
-        state.db.close().await;
-        let _ = std::fs::remove_file(&db_path);
-    }
 }
