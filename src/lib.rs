@@ -23,6 +23,7 @@ pub mod payoff;
 pub mod positions;
 pub mod prices;
 pub mod rate_limit_key;
+pub mod rates;
 pub mod request_id;
 pub mod strategies;
 pub mod strkey;
@@ -79,7 +80,17 @@ pub struct BSInputs {
     pub vol: f64,    // annualised volatility (e.g. 0.80 = 80%)
     pub t: f64,      // time to expiry in years
     pub r: f64,      // risk-free rate (e.g. 0.05 = 5%)
+    /// Carry rate `b = r - q` used by the generalised Black-Scholes-Merton
+    /// model. When `None`, defaults to `r` (i.e. `q = 0`).
+    pub carry: Option<f64>,
     pub is_call: bool,
+}
+
+impl BSInputs {
+    /// Effective carry `b = r - q`, falling back to `r` when unset.
+    pub fn carry(&self) -> f64 {
+        self.carry.unwrap_or(self.r)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -95,6 +106,10 @@ pub struct BSResult {
     pub intrinsic: f64,
     pub time_value: f64,
     pub iv: f64,
+    /// Risk-free rate used for this valuation.
+    pub rate: f64,
+    /// Carry `b = r - q` used for this valuation.
+    pub carry: f64,
 }
 
 pub fn black_scholes(inputs: &BSInputs) -> BSResult {
@@ -105,7 +120,9 @@ pub fn black_scholes(inputs: &BSInputs) -> BSResult {
         t,
         r,
         is_call,
+        ..
     } = *inputs;
+    let b = inputs.carry();
 
     if t <= 0.0 {
         // At expiry: intrinsic only
@@ -126,39 +143,47 @@ pub fn black_scholes(inputs: &BSInputs) -> BSResult {
             intrinsic,
             time_value: 0.0,
             iv: sigma,
+            rate: r,
+            carry: b,
         };
     }
 
     let sqrt_t = t.sqrt();
-    let d1 = ((s / k).ln() + (r + 0.5 * sigma * sigma) * t) / (sigma * sqrt_t);
+    // Generalised Black-Scholes-Merton with carry b = r - q.
+    let d1 = ((s / k).ln() + (b + 0.5 * sigma * sigma) * t) / (sigma * sqrt_t);
     let d2 = d1 - sigma * sqrt_t;
 
-    let disc = (-r * t).exp();
+    let disc_r = (-r * t).exp();
+    let disc_q = (-(r - b) * t).exp();
 
     let (premium, delta, rho) = if is_call {
         let nd1 = norm_cdf(d1);
         let nd2 = norm_cdf(d2);
-        let price = s * nd1 - k * disc * nd2;
-        let del = nd1;
-        let r_val = k * t * disc * nd2 / 100.0;
+        let price = s * disc_q * nd1 - k * disc_r * nd2;
+        let del = disc_q * nd1;
+        let r_val = k * t * disc_r * nd2 / 100.0;
         (price, del, r_val)
     } else {
         let nd1 = norm_cdf(-d1);
         let nd2 = norm_cdf(-d2);
-        let price = k * disc * nd2 - s * nd1;
-        let del = nd1 - 1.0;
-        let r_val = -k * t * disc * nd2 / 100.0;
+        let price = k * disc_r * nd2 - s * disc_q * nd1;
+        let del = -disc_q * nd1;
+        let r_val = -k * t * disc_r * nd2 / 100.0;
         (price, del, r_val)
     };
 
     let pdf_d1 = norm_pdf(d1);
-    let gamma = pdf_d1 / (s * sigma * sqrt_t);
-    let vega = s * pdf_d1 * sqrt_t / 100.0; // per 1% vol
+    let gamma = disc_q * pdf_d1 / (s * sigma * sqrt_t);
+    let vega = s * disc_q * pdf_d1 * sqrt_t / 100.0; // per 1% vol
 
     let theta = if is_call {
-        (-(s * pdf_d1 * sigma) / (2.0 * sqrt_t) - r * k * disc * norm_cdf(d2)) / 365.0
+        (-(s * disc_q * pdf_d1 * sigma) / (2.0 * sqrt_t) - r * k * disc_r * norm_cdf(d2)
+            + (r - b) * s * disc_q * norm_cdf(d1))
+            / 365.0
     } else {
-        (-(s * pdf_d1 * sigma) / (2.0 * sqrt_t) + r * k * disc * norm_cdf(-d2)) / 365.0
+        (-(s * disc_q * pdf_d1 * sigma) / (2.0 * sqrt_t) + r * k * disc_r * norm_cdf(-d2)
+            - (r - b) * s * disc_q * norm_cdf(-d1))
+            / 365.0
     };
 
     let intrinsic = if is_call {
@@ -180,6 +205,8 @@ pub fn black_scholes(inputs: &BSInputs) -> BSResult {
         intrinsic,
         time_value,
         iv: sigma,
+        rate: r,
+        carry: b,
     }
 }
 
@@ -239,13 +266,14 @@ const IV_TOL: f64 = 1e-10;
 /// Maximum safeguarded-Newton / Brent iterations.
 const IV_MAX_ITER: usize = 200;
 
-/// No-arbitrage upper bound for a European option.
-fn iv_upper_bound(spot: f64, strike: f64, t: f64, r: f64, is_call: bool) -> f64 {
-    let disc = (-r * t).exp();
+/// No-arbitrage upper bound for a European option under carry `b`.
+fn iv_upper_bound(spot: f64, strike: f64, t: f64, r: f64, carry: f64, is_call: bool) -> f64 {
+    let disc_r = (-r * t).exp();
+    let disc_q = (-(r - carry) * t).exp();
     if is_call {
-        spot
+        spot * disc_q
     } else {
-        strike * disc
+        strike * disc_r
     }
 }
 
@@ -270,224 +298,6 @@ fn iv_initial_guess(market_price: f64, spot: f64, strike: f64, t: f64, r: f64) -
 /// (bisection / Brent-style) so that deep-OTM options, very short expiries,
 /// and high-vol regimes converge instead of diverging or oscillating.
 ///
-/// Returns `Ok(sigma)` with `|price(sigma) - market_price| < 1e-10` when the
-/// market price lies strictly inside the no-arbitrage bounds, or a typed
-/// [`IvError`] otherwise.
-pub fn implied_vol(
-    market_price: f64,
-    spot: f64,
-    strike: f64,
-    t: f64,
-    r: f64,
-    is_call: bool,
-) -> Result<f64, IvError> {
-    // ── Input validation ──────────────────────────────────────────────────
-    if !market_price.is_finite()
-        || !spot.is_finite()
-        || !strike.is_finite()
-        || !t.is_finite()
-        || !r.is_finite()
-        || spot <= 0.0
-        || strike <= 0.0
-        || t <= 0.0
-        || market_price <= 0.0
-    {
-        return Err(IvError::InvalidInput);
-    }
+/// Returns `Ok(sig
 
-    let intrinsic = if is_call {
-        (spot - strike).max(0.0)
-    } else {
-        (strike - spot).max(0.0)
-    };
-    let upper = iv_upper_bound(spot, strike, t, r, is_call);
-
-    // Price exactly at intrinsic corresponds to the IV = 0 limit; the issue
-    // asks us to reject prices at or below intrinsic with a typed error.
-    if market_price <= intrinsic {
-        return Err(IvError::BelowIntrinsic);
-    }
-    if market_price >= upper {
-        return Err(IvError::AboveUpperBound);
-    }
-
-    // ── Bracket setup ─────────────────────────────────────────────────────
-    let price_at = |sigma: f64| -> f64 {
-        black_scholes(&BSInputs {
-            spot,
-            strike,
-            vol: sigma,
-            t,
-            r,
-            is_call,
-        })
-        .premium
-    };
-
-    let mut lo = IV_MIN_VOL;
-    let mut hi = IV_MAX_VOL;
-    let mut f_lo = price_at(lo) - market_price;
-    let mut f_hi = price_at(hi) - market_price;
-
-    // If the bracket does not straddle the target, the price is outside the
-    // reachable range for vol in [IV_MIN_VOL, IV_MAX_VOL].
-    if f_lo > 0.0 {
-        return Err(IvError::BelowIntrinsic);
-    }
-    if f_hi < 0.0 {
-        return Err(IvError::AboveUpperBound);
-    }
-
-    // ── Safeguarded Newton with bracketed fallback ────────────────────────
-    let mut sigma = iv_initial_guess(market_price, spot, strike, t, r);
-    if sigma <= lo || sigma >= hi {
-        sigma = 0.5 * (lo + hi);
-    }
-
-    let mut last_bisect = false;
-    for _ in 0..IV_MAX_ITER {
-        let bs = black_scholes(&BSInputs {
-            spot,
-            strike,
-            vol: sigma,
-            t,
-            r,
-            is_call,
-        });
-        let diff = bs.premium - market_price;
-        if diff.abs() < IV_TOL {
-            return Ok(sigma);
-        }
-
-        // Maintain the bracket using the sign of the residual.
-        if diff > 0.0 {
-            hi = sigma;
-            f_hi = diff;
-        } else {
-            lo = sigma;
-            f_lo = diff;
-        }
-
-        // Newton step (vega is per 1% vol, so scale by 100 for per-unit).
-        let vega_unit = bs.vega * 100.0;
-        let mut next = if vega_unit.abs() > 1e-14 {
-            sigma - diff / vega_unit
-        } else {
-            f64::NAN
-        };
-
-        // Fall back to bisection when the Newton step is unusable, leaves the
-        // bracket, or fails to reduce the residual (oscillation guard).
-        let newton_ok = next.is_finite()
-            && next > lo
-            && next < hi
-            && (next - sigma).abs() < 0.5 * (hi - lo);
-
-        if !newton_ok {
-            next = 0.5 * (lo + hi);
-            last_bisect = true;
-        } else {
-            last_bisect = false;
-        }
-
-        // Brent-style secant refinement when we have a valid bracket and the
-        // last step was not a forced bisection.
-        if !last_bisect && f_hi != f_lo {
-            let secant = hi - f_hi * (hi - lo) / (f_hi - f_lo);
-            if secant.is_finite() && secant > lo && secant < hi {
-                next = secant;
-            }
-        }
-
-        if (next - sigma).abs() < 1e-15 {
-            // No further progress possible; accept if within tolerance.
-            let final_diff = price_at(next) - market_price;
-            if final_diff.abs() < IV_TOL {
-                return Ok(next);
-            }
-            return Err(IvError::NoConvergence);
-        }
-        sigma = next;
-    }
-
-    // Final tolerance check after the iteration budget is exhausted.
-    if (price_at(sigma) - market_price).abs() < IV_TOL {
-        Ok(sigma)
-    } else {
-        Err(IvError::NoConvergence)
-    }
-}
-
-// ─── Market Data ──────────────────────────────────────────────────────────────
-
-#[derive(Clone)]
-pub struct AppState {
-    pub spot_prices: Arc<std::sync::Mutex<std::collections::HashMap<String, f64>>>,
-    pub vol_surface: Arc<std::sync::Mutex<std::collections::HashMap<String, f64>>>,
-    pub db: sqlx::SqlitePool,
-    /// Broadcasts a JSON-encoded SpotResponse every time the price
-    /// simulator nudges spot_prices, for the /api/v1/ws/spot handler to
-    /// forward to connected clients. `send` errors (no receivers) are
-    /// expected and ignored — the simulator runs regardless of whether
-    /// anyone's listening.
-    pub spot_tx: tokio::sync::broadcast::Sender<String>,
-}
-
-impl AppState {
-    pub fn new(db: sqlx::SqlitePool) -> Self {
-        let mut prices = std::collections::HashMap::new();
-        prices.insert("XLM".into(), 0.1182);
-        prices.insert("BTC".into(), 67420.50);
-        prices.insert("ETH".into(), 3512.80);
-        prices.insert("SOL".into(), 182.45);
-
-        let mut vols = std::collections::HashMap::new();
-        vols.insert("XLM".into(), 0.82); // 82% ann vol
-        vols.insert("BTC".into(), 0.65);
-        vols.insert("ETH".into(), 0.72);
-        vols.insert("SOL".into(), 0.91);
-
-        let (spot_tx, _) = tokio::sync::broadcast::channel(16);
-
-        Self {
-            spot_prices: Arc::new(std::sync::Mutex::new(prices)),
-            vol_surface: Arc::new(std::sync::Mutex::new(vols)),
-            db,
-            spot_tx,
-        }
-    }
-}
-
-// ─── Request / Response Types ─────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-pub struct PriceQuery {
-    pub underlying: String,
-    pub strike: f64,
-    pub expiry_days: f64,
-    pub option_type: String, // "call" | "put"
-}
-
-#[derive(Deserialize)]
-pub struct IvQuery {
-    pub underlying: String,
-    pub strike: f64,
-    pub expiry_days: f64,
-    pub option_type: String, // "call" | "put"
-    pub market_price: f64,
-}
-
-#[derive(Serialize)]
-pub struct IvResult {
-    pub implied_vol: f64,
-}
-
-#[derive(Serialize)]
-pub struct OptionChainEntry {
-    pub strike: f64,
-    pub expiry_days: f64,
-    pub call: BSResult,
-    pub put: BSResult,
-    pub is_itm_call: bool,
-
-/* … truncated 14639 chars — edit only what you need near the top … */
+/* … truncated 6600 chars — edit only what you need near the top … */
