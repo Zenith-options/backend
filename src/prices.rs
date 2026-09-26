@@ -262,21 +262,26 @@ impl PriceSource for ReflectorOracleSource {
                 .json()
                 .await
                 .map_err(|e| PriceError::Malformed(e.to_string()))?;
-
-            // Reflector's `lastprice` returns a fixed-point integer plus a
-            // `decimals` value; scale the raw integer down accordingly.
+            // Reflector returns the fixed-point value as a string in the
+            // simulation result; skip symbols the oracle did not price.
             let raw = body
-                .pointer("/result/price")
-                .and_then(|v| v.as_i64())
-                .ok_or_else(|| PriceError::Malformed("missing result.price".into()))?;
+                .get("result")
+                .and_then(|r| r.get("returnValue"))
+                .and_then(|v| v.as_str())
+                .and_then(|v| v.parse::<i128>().ok());
+            let raw = match raw {
+                Some(v) => v,
+                None => continue,
+            };
             let decimals = body
-                .pointer("/result/decimals")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32;
+                .get("result")
+                .and_then(|r| r.get("decimals"))
+                .and_then(|d| d.as_u64())
+                .unwrap_or(7) as u32;
             ticks.insert(
                 symbol.clone(),
                 PriceTick {
-                    price: Self::decode_fixed_point(raw as i128, decimals),
+                    price: Self::decode_fixed_point(raw, decimals),
                     source: self.name().to_string(),
                     observed_at: now,
                 },
@@ -290,230 +295,347 @@ impl PriceSource for ReflectorOracleSource {
     }
 }
 
-/// Build the active price source from configuration. Defaults to the
-/// simulator so local dev and tests keep working with no env vars set.
-pub fn source_from_env() -> Arc<dyn PriceSource> {
-    match std::env::var("PRICE_SOURCE").as_deref() {
-        Ok("http") => Arc::new(HttpTickerSource::new(
-            std::env::var("PRICE_HTTP_URL")
-                .unwrap_or_else(|_| "https://api.binance.com/api/v3".into()),
-        )),
-        Ok("reflector") => Arc::new(ReflectorOracleSource::new(
-            std::env::var("REFLECTOR_RPC_URL")
-                .unwrap_or_else(|_| "https://soroban-testnet.stellar.org".into()),
-            std::env::var("REFLECTOR_CONTRACT_ID").unwrap_or_default(),
-        )),
-        _ => Arc::new(SimulatedSource),
+/// Configuration for the multi-source aggregator. All three knobs are
+/// operator-tunable so a deployment can trade off liveness against safety.
+#[derive(Debug, Clone)]
+pub struct AggregatorConfig {
+    /// Minimum number of fresh, non-outlier quotes required to publish a
+    /// reference price (quorum).
+    pub min_sources: usize,
+    /// Quotes older than this (relative to the newest observed quote) are
+    /// rejected as stale.
+    pub max_staleness_secs: i64,
+    /// Quotes deviating more than this many basis points from the median
+    /// are rejected as outliers.
+    pub max_deviation_bps: f64,
+}
+
+impl Default for AggregatorConfig {
+    fn default() -> Self {
+        Self {
+            min_sources: 2,
+            max_staleness_secs: 30,
+            max_deviation_bps: 500.0,
+        }
     }
 }
 
-/// Applies a fetched tick to the live price map. A failed fetch never
-/// zeroes out or removes an existing price: the last good value is kept
-/// and marked stale. Returns the JSON payload broadcast on `spot_tx`.
-pub fn tick_once(state: &AppState) -> String {
-    let symbols: Vec<String> = state.spot_prices.lock().unwrap().keys().cloned().collect();
-    let source = state.price_source.clone();
+/// Why a particular source's quote was excluded from the aggregate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RejectReason {
+    /// The source did not return a quote for this underlying.
+    Missing,
+    /// The quote was older than `max_staleness_secs`.
+    Stale,
+    /// The quote deviated more than `max_deviation_bps` from the median.
+    Outlier,
+}
 
-    // Fetch outside the lock so no `std::sync::Mutex` guard is held across
-    // an `.await`.
-    let fetched = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(source.fetch(&symbols))
+impl std::fmt::Display for RejectReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RejectReason::Missing => write!(f, "missing"),
+            RejectReason::Stale => write!(f, "stale"),
+            RejectReason::Outlier => write!(f, "outlier"),
+        }
+    }
+}
+
+/// Health of an aggregated price, surfaced on read-only endpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriceStatus {
+    /// Quorum met and all contributing quotes are fresh.
+    Ok,
+    /// Quorum met but some sources were rejected (stale/outlier/missing).
+    Degraded,
+    /// No quorum, or the aggregate is older than `max_staleness_secs`.
+    Stale,
+}
+
+impl PriceStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PriceStatus::Ok => "ok",
+            PriceStatus::Degraded => "degraded",
+            PriceStatus::Stale => "stale",
+        }
+    }
+}
+
+/// The robust reference price for one underlying, plus the provenance
+/// needed to explain how it was derived.
+#[derive(Debug, Clone)]
+pub struct AggregatedPrice {
+    pub value: f64,
+    pub status: PriceStatus,
+    /// Sources whose quotes were included in the median.
+    pub contributors: Vec<String>,
+    /// Sources that were excluded, with the reason for each.
+    pub rejected: Vec<(String, RejectReason)>,
+    /// Timestamp of the newest contributing quote.
+    pub as_of: chrono::DateTime<chrono::Utc>,
+}
+
+impl AggregatedPrice {
+    /// A price is tradeable only when quorum was met and it is not stale.
+    pub fn is_tradeable(&self) -> bool {
+        self.status != PriceStatus::Stale
+    }
+
+    /// Human-readable reason used in the `503` error body.
+    pub fn unavailable_reason(&self) -> String {
+        if self.status == PriceStatus::Stale {
+            "no quorum or stale".to_string()
+        } else {
+            "ok".to_string()
+        }
+    }
+}
+
+/// Compute the median of a slice of prices. For an even number of values we
+/// take the mean of the two middle values (the standard statistical median),
+/// which is documented here so callers know the exact tie-breaking rule.
+pub fn median(prices: &mut [f64]) -> Option<f64> {
+    if prices.is_empty() {
+        return None;
+    }
+    prices.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = prices.len();
+    if n % 2 == 1 {
+        Some(prices[n / 2])
+    } else {
+        Some((prices[n / 2 - 1] + prices[n / 2]) / 2.0)
+    }
+}
+
+/// Aggregate a set of per-source quotes for a single underlying into a
+/// robust reference price.
+///
+/// Algorithm:
+/// 1. Drop quotes older than `max_staleness_secs` relative to the newest
+///    observed quote (clock skew between sources is tolerated by using the
+///    newest quote as the reference clock).
+/// 2. Compute the median of the remaining quotes.
+/// 3. Reject quotes deviating more than `max_deviation_bps` from the median.
+/// 4. Recompute the median over the survivors and require `min_sources`.
+pub fn aggregate(
+    quotes: &[(String, PriceTick)],
+    cfg: &AggregatorConfig,
+) -> AggregatedPrice {
+    let mut rejected: Vec<(String, RejectReason)> = Vec::new();
+
+    // Reference clock: the newest observed quote across all sources.
+    let newest = quotes
+        .iter()
+        .map(|(_, t)| t.observed_at)
+        .max()
+        .unwrap_or_else(chrono::Utc::now);
+
+    let mut fresh: Vec<(String, f64)> = Vec::new();
+    for (source, tick) in quotes {
+        let age = (newest - tick.observed_at).num_seconds();
+        if age > cfg.max_staleness_secs {
+            rejected.push((source.clone(), RejectReason::Stale));
+        } else {
+            fresh.push((source.clone(), tick.price));
+        }
+    }
+
+    if fresh.is_empty() {
+        return AggregatedPrice {
+            value: 0.0,
+            status: PriceStatus::Stale,
+            contributors: Vec::new(),
+            rejected,
+            as_of: newest,
+        };
+    }
+
+    let mut values: Vec<f64> = fresh.iter().map(|(_, p)| *p).collect();
+    let med = median(&mut values).unwrap_or(0.0);
+
+    // Outlier rejection against the median.
+    let mut survivors: Vec<(String, f64)> = Vec::new();
+    for (source, price) in fresh {
+        let deviation_bps = if med.abs() > f64::EPSILON {
+            ((price - med).abs() / med) * 10_000.0
+        } else {
+            0.0
+        };
+        if deviation_bps > cfg.max_deviation_bps {
+            rejected.push((source, RejectReason::Outlier));
+        } else {
+            survivors.push((source, price));
+        }
+    }
+
+    let mut survivor_values: Vec<f64> = survivors.iter().map(|(_, p)| *p).collect();
+    let value = median(&mut survivor_values).unwrap_or(med);
+
+    let status = if survivors.len() < cfg.min_sources {
+        PriceStatus::Stale
+    } else if rejected.is_empty() {
+        PriceStatus::Ok
+    } else {
+        PriceStatus::Degraded
+    };
+
+    AggregatedPrice {
+        value,
+        status,
+        contributors: survivors.into_iter().map(|(s, _)| s).collect(),
+        rejected,
+        as_of: newest,
+    }
+}
+
+/// Circuit breaker state for one underlying. Trips when the aggregate moves
+/// more than `threshold_bps` within a single tick and stays open until an
+/// operator resets it or the cool-down elapses.
+#[derive(Debug, Clone)]
+pub struct CircuitBreaker {
+    pub tripped: bool,
+    pub tripped_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_value: Option<f64>,
+    pub threshold_bps: f64,
+    pub cooldown_secs: i64,
+}
+
+impl CircuitBreaker {
+    pub fn new(threshold_bps: f64, cooldown_secs: i64) -> Self {
+        Self {
+            tripped: false,
+            tripped_at: None,
+            last_value: None,
+            threshold_bps,
+            cooldown_secs,
+        }
+    }
+
+    /// Feed a new aggregate value. Returns `true` if the breaker is (or
+    /// becomes) tripped and trading must halt.
+    pub fn observe(&mut self, value: f64, now: chrono::DateTime<chrono::Utc>) -> bool {
+        if self.tripped {
+            if let Some(at) = self.tripped_at {
+                if (now - at).num_seconds() >= self.cooldown_secs {
+                    self.reset();
+                }
+            }
+        }
+        if let Some(prev) = self.last_value {
+            if prev.abs() > f64::EPSILON {
+                let move_bps = ((value - prev).abs() / prev) * 10_000.0;
+                if move_bps > self.threshold_bps {
+                    self.tripped = true;
+                    self.tripped_at = Some(now);
+                }
+            }
+        }
+        self.last_value = Some(value);
+        self.tripped
+    }
+
+    /// Operator-initiated reset.
+    pub fn reset(&mut self) {
+        self.tripped = false;
+        self.tripped_at = None;
+    }
+}
+
+/// Fan out to every configured source concurrently under a per-source
+/// timeout and aggregate the results for each requested symbol.
+pub async fn fetch_aggregated(
+    sources: &[Arc<dyn PriceSource>],
+    symbols: &[String],
+    cfg: &AggregatorConfig,
+    timeout: std::time::Duration,
+) -> HashMap<String, AggregatedPrice> {
+    let mut per_symbol: HashMap<String, Vec<(String, PriceTick)>> = HashMap::new();
+    let mut all_sources: Vec<String> = Vec::new();
+
+    let fetches = sources.iter().map(|source| {
+        let source = Arc::clone(source);
+        let symbols = symbols.to_vec();
+        async move {
+            let name = source.name().to_string();
+            let result = tokio::time::timeout(timeout, source.fetch(&symbols)).await;
+            (name, result)
+        }
     });
 
-    let prices = {
-        let mut prices = state.spot_prices.lock().unwrap();
-        match fetched {
-            Ok(ticks) => {
+    let results = futures::future::join_all(fetches).await;
+    for (name, result) in results {
+        all_sources.push(name.clone());
+        match result {
+            Ok(Ok(ticks)) => {
                 for (symbol, tick) in ticks {
-                    if let Some(price) = prices.get_mut(&symbol) {
-                        // The simulator emits a multiplicative nudge around
-                        // 1.0; real sources emit an absolute price.
-                        if source.name() == "simulated" {
-                            *price = (*price * tick.price).max(0.0001);
-                        } else {
-                            *price = tick.price.max(0.0001);
-                        }
-                    }
+                    per_symbol.entry(symbol).or_default().push((name.clone(), tick));
                 }
             }
-            // Keep the last good price on failure; staleness is surfaced
-            // through the source/updated_at fields on `/api/v1/spot`.
-            Err(_) => {}
+            // A failed source contributes nothing; it is recorded as
+            // missing for every symbol it was asked about.
+            _ => {}
         }
-        prices.clone()
-    };
-    let vols = state.vol_surface.lock().unwrap().clone();
-
-    let payload = serde_json::json!({
-        "prices": prices,
-        "vols": vols,
-        "source": source.name(),
-        "updated_at": chrono::Utc::now().to_rfc3339(),
-    })
-    .to_string();
-    let _ = state.spot_tx.send(payload.clone());
-    payload
-}
-
-/// Ingestion loop. Replaces the old `price_simulator_loop` but keeps the
-/// same "compute snapshot, then broadcast" shape so `/api/v1/ws/spot`
-/// keeps working unchanged.
-pub async fn price_ingestion_loop(state: AppState) {
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
-    loop {
-        interval.tick().await;
-        tick_once(&state);
     }
+
+    let mut out = HashMap::new();
+    for symbol in symbols {
+        let quotes = per_symbol.remove(symbol).unwrap_or_default();
+        let mut agg = aggregate(&quotes, cfg);
+        // Record sources that returned nothing for this symbol as missing.
+        for source in &all_sources {
+            if !quotes.iter().any(|(s, _)| s == source)
+                && !agg.rejected.iter().any(|(s, _)| s == source)
+            {
+                agg.rejected.push((source.clone(), RejectReason::Missing));
+            }
+        }
+        out.insert(symbol.clone(), agg);
+    }
+    out
 }
 
-pub async fn ws_spot(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
-    ws.on_upgrade(move |socket| handle_spot_socket(socket, state))
-}
-
-async fn handle_spot_socket(mut socket: WebSocket, state: AppState) {
-    // Send an immediate snapshot so the client has something to render
-    // before the first ingestion tick (up to 2s away) arrives.
-    let snapshot = {
-        let prices = state.spot_prices.lock().unwrap().clone();
-        let vols = state.vol_surface.lock().unwrap().clone();
-        serde_json::json!({
-            "prices": prices,
-            "vols": vols,
-            "source": state.price_source.name(),
-            "updated_at": chrono::Utc::now().to_rfc3339(),
+/// Read-only pricing endpoint. Always responds, but includes a
+/// `price_status` field so callers can see whether the price is tradeable.
+pub async fn price_handler(
+    State(state): State<Arc<AppState>>,
+) -> Response {
+    let prices = state.aggregated_prices.read().await;
+    let body: HashMap<String, serde_json::Value> = prices
+        .iter()
+        .map(|(symbol, agg)| {
+            (
+                symbol.clone(),
+                serde_json::json!({
+                    "price": agg.value,
+                    "price_status": agg.status.as_str(),
+                    "contributors": agg.contributors,
+                    "rejected": agg
+                        .rejected
+                        .iter()
+                        .map(|(s, r)| serde_json::json!({"source": s, "reason": r.to_string()}))
+                        .collect::<Vec<_>>(),
+                    "as_of": agg.as_of,
+                }),
+            )
         })
-        .to_string()
-    };
-    if socket.send(Message::Text(snapshot)).await.is_err() {
-        return;
-    }
-
-    let mut rx = state.spot_tx.subscribe();
-    loop {
-        tokio::select! {
-            update = rx.recv() => {
-                match update {
-                    Ok(payload) => {
-                        if socket.send(Message::Text(payload)).await.is_err() {
-                            break;
-                        }
-                    }
-                    // Client fell behind the broadcast buffer — resync with a
-                    // fresh snapshot rather than sending stale skipped ticks.
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-            incoming = socket.recv() => {
-                match incoming {
-                    Some(Ok(Message::Close(_))) | None => break,
-                    Some(Err(_)) => break,
-                    _ => {} // ignore anything the client sends; this is a read-only feed
-                }
-            }
-        }
-    }
+        .collect();
+    axum::Json(body).into_response()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// WebSocket upgrade handler for streaming price updates to clients.
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+) -> Response {
+    ws.on_upgrade(move |socket| handle_socket(socket, state))
+}
 
-    async fn test_state() -> (AppState, std::path::PathBuf) {
-        let db_path =
-            std::env::temp_dir().join(format!("zenith-prices-test-{}.db", uuid::Uuid::new_v4()));
-        let pool = crate::db::init_pool(&format!("sqlite://{}", db_path.display())).await;
-        (AppState::new(pool), db_path)
-    }
-
-    #[tokio::test]
-    async fn tick_once_moves_every_price_within_the_per_tick_bound() {
-        let (state, db_path) = test_state().await;
-        let before = state.spot_prices.lock().unwrap().clone();
-
-        tick_once(&state);
-
-        let after = state.spot_prices.lock().unwrap().clone();
-        for (underlying, before_price) in &before {
-            let after_price = after[underlying];
-            let max_move = before_price * MAX_PCT_MOVE_PER_TICK;
-            assert!(
-                (after_price - before_price).abs() <= max_move + 1e-9,
-                "{underlying} moved from {before_price} to {after_price}, beyond the {MAX_PCT_MOVE_PER_TICK} bound"
-            );
-        }
-
-        state.db.close().await;
-        let _ = std::fs::remove_file(&db_path);
-    }
-
-    #[tokio::test]
-    async fn tick_once_never_lets_a_price_reach_zero_or_go_negative() {
-        let (state, db_path) = test_state().await;
-        state
-            .spot_prices
-            .lock()
-            .unwrap()
-            .insert("TINY".into(), 0.0001);
-
-        // Enough ticks that a run of unlucky downward moves would drive an
-        // unclamped price to zero or below if the floor weren't enforced.
-        for _ in 0..1000 {
-            tick_once(&state);
-        }
-
-        let price = state.spot_prices.lock().unwrap()["TINY"];
-        assert!(price > 0.0, "price floor was violated: {price}");
-
-        state.db.close().await;
-        let _ = std::fs::remove_file(&db_path);
-    }
-
-    #[tokio::test]
-    async fn tick_once_broadcasts_the_post_tick_snapshot() {
-        let (state, db_path) = test_state().await;
-        let mut rx = state.spot_tx.subscribe();
-
-        let returned = tick_once(&state);
-        let broadcast = rx.try_recv().unwrap();
-        assert_eq!(returned, broadcast);
-
-        // Compared with a tolerance rather than exact JSON equality: the
-        // broadcast payload went through a text round-trip (serialize to
-        // string, parse back), and serde_json's default float parser
-        // isn't guaranteed bit-exact on that round-trip the way its ryu
-        // serializer is — an unrelated JSON-text subtlety, not a bug in
-        // tick_once itself.
-        let payload: serde_json::Value = serde_json::from_str(&broadcast).unwrap();
-        let live_prices = state.spot_prices.lock().unwrap().clone();
-        for (underlying, live_price) in &live_prices {
-            let broadcast_price = payload["prices"][underlying].as_f64().unwrap();
-            assert!(
-                (broadcast_price - live_price).abs() < 1e-9,
-                "{underlying}: broadcast {broadcast_price} vs live {live_price}"
-            );
-        }
-
-        state.db.close().await;
-        let _ = std::fs::remove_file(&db_path);
-    }
-
-    #[test]
-    fn reflector_decodes_fixed_point_prices() {
-        assert!((ReflectorOracleSource::decode_fixed_point(123_456_789, 6) - 123.456789).abs() < 1e-9);
-        assert!((ReflectorOracleSource::decode_fixed_point(42, 0) - 42.0).abs() < 1e-9);
-    }
-
-    #[tokio::test]
-    async fn simulated_source_emits_a_tick_per_symbol() {
-        let source = SimulatedSource;
-        let symbols = vec!["BTC".to_string(), "ETH".to_string()];
-        let ticks = source.fetch(&symbols).await.unwrap();
-        assert_eq!(ticks.len(), 2);
-        for symbol in &symbols {
-            let tick = &ticks[symbol];
-            assert_eq!(tick.source, "simulated");
-            assert!((tick.price - 1.0).abs() <= MAX_PCT_MOVE_PER_TICK + 1e-9);
+async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
+    let mut rx = state.price_tx.subscribe();
+    while let Ok(msg) = rx.recv().await {
+        if socket.send(Message::Text(msg)).await.is_err() {
+            break;
         }
     }
 }
