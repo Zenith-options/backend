@@ -37,6 +37,12 @@ pub struct HistoryResponse {
 /// no separate append-only history table, since a position's own status
 /// transition already records everything a ledger entry needs.
 ///
+/// Partial closes insert a `closed` child row (with `parent_position_id`
+/// pointing at the still-open remainder) rather than mutating the original
+/// row's status, so those child rows show up here automatically alongside
+/// full closes and rolls. The original row stays `open` with its reduced
+/// `contracts`/`collateral`, which is what `list_positions` returns.
+///
 /// `stats` is always computed over the FULL history regardless of
 /// limit/offset — pagination only applies to which rows `trades` returns,
 /// since a win/loss/pnl summary that changed depending on which page you
