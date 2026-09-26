@@ -13,19 +13,26 @@ const MAX_PCT_MOVE_PER_TICK: f64 = 0.003; // +/-0.3%
 /// error). Pulled out of the loop below so a test can assert on the
 /// bounds of one tick directly instead of only observing it through a
 /// live 2-second timer.
+///
+/// The new spot/vol pair is published as a single immutable
+/// `MarketSnapshot` via read-copy-update, so readers never observe a torn
+/// (spot, vol) pair and never take a lock.
 pub fn tick_once(state: &AppState) -> String {
-    let prices = {
-        let mut prices = state.spot_prices.lock().unwrap();
-        for price in prices.values_mut() {
-            let pct_move =
-                rand::thread_rng().gen_range(-MAX_PCT_MOVE_PER_TICK..MAX_PCT_MOVE_PER_TICK);
-            *price = (*price * (1.0 + pct_move)).max(0.0001);
-        }
-        prices.clone()
-    };
-    let vols = state.vol_surface.lock().unwrap().clone();
+    let current = state.market.load();
+    let mut prices = current.spot.clone();
+    for price in prices.values_mut() {
+        let pct_move =
+            rand::thread_rng().gen_range(-MAX_PCT_MOVE_PER_TICK..MAX_PCT_MOVE_PER_TICK);
+        *price = (*price * (1.0 + pct_move)).max(0.0001);
+    }
+    let vols = current.vol.clone();
 
-    let payload = serde_json::json!({ "prices": prices, "vols": vols }).to_string();
+    let snapshot = state.publish_snapshot(prices, vols);
+    let payload = serde_json::json!({
+        "prices": snapshot.spot,
+        "vols": snapshot.vol,
+    })
+    .to_string();
     let _ = state.spot_tx.send(payload.clone());
     payload
 }
@@ -48,11 +55,15 @@ pub async fn ws_spot(ws: WebSocketUpgrade, State(state): State<AppState>) -> Res
 
 async fn handle_spot_socket(mut socket: WebSocket, state: AppState) {
     // Send an immediate snapshot so the client has something to render
-    // before the first simulator tick (up to 2s away) arrives.
+    // before the first simulator tick (up to 2s away) arrives. A single
+    // load gives a consistent (spot, vol) pair for the whole message.
     let snapshot = {
-        let prices = state.spot_prices.lock().unwrap().clone();
-        let vols = state.vol_surface.lock().unwrap().clone();
-        serde_json::json!({ "prices": prices, "vols": vols }).to_string()
+        let market = state.market.load();
+        serde_json::json!({
+            "prices": market.spot,
+            "vols": market.vol,
+        })
+        .to_string()
     };
     if socket.send(Message::Text(snapshot)).await.is_err() {
         return;
@@ -99,11 +110,11 @@ mod tests {
     #[tokio::test]
     async fn tick_once_moves_every_price_within_the_per_tick_bound() {
         let (state, db_path) = test_state().await;
-        let before = state.spot_prices.lock().unwrap().clone();
+        let before = state.market.load().spot.clone();
 
         tick_once(&state);
 
-        let after = state.spot_prices.lock().unwrap().clone();
+        let after = state.market.load().spot.clone();
         for (underlying, before_price) in &before {
             let after_price = after[underlying];
             let max_move = before_price * MAX_PCT_MOVE_PER_TICK;
@@ -120,11 +131,7 @@ mod tests {
     #[tokio::test]
     async fn tick_once_never_lets_a_price_reach_zero_or_go_negative() {
         let (state, db_path) = test_state().await;
-        state
-            .spot_prices
-            .lock()
-            .unwrap()
-            .insert("TINY".into(), 0.0001);
+        state.set_spot_for_test("TINY".into(), 0.0001);
 
         // Enough ticks that a run of unlucky downward moves would drive an
         // unclamped price to zero or below if the floor weren't enforced.
@@ -132,7 +139,7 @@ mod tests {
             tick_once(&state);
         }
 
-        let price = state.spot_prices.lock().unwrap()["TINY"];
+        let price = state.market.load().spot["TINY"];
         assert!(price > 0.0, "price floor was violated: {price}");
 
         state.db.close().await;
@@ -155,13 +162,68 @@ mod tests {
         // serializer is — an unrelated JSON-text subtlety, not a bug in
         // tick_once itself.
         let payload: serde_json::Value = serde_json::from_str(&broadcast).unwrap();
-        let live_prices = state.spot_prices.lock().unwrap().clone();
+        let live_prices = state.market.load().spot.clone();
         for (underlying, live_price) in &live_prices {
             let broadcast_price = payload["prices"][underlying].as_f64().unwrap();
             assert!(
                 (broadcast_price - live_price).abs() < 1e-9,
                 "{underlying}: broadcast {broadcast_price} vs live {live_price}"
             );
+        }
+
+        state.db.close().await;
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    /// Hammers reads while the writer publishes new snapshots and asserts
+    /// that no reader ever observes a torn (spot, vol) pair: the spot and
+    /// vol maps must always come from the same published version.
+    #[tokio::test]
+    async fn concurrent_reads_never_observe_a_torn_snapshot() {
+        let (state, db_path) = test_state().await;
+
+        // Seed a known, version-tagged pair so a torn read is detectable:
+        // spot["PAIR"] and vol["PAIR"] must always carry the same version.
+        let mut spot = state.market.load().spot.clone();
+        let mut vol = state.market.load().vol.clone();
+        spot.insert("PAIR".into(), 1.0);
+        vol.insert("PAIR".into(), 1.0);
+        state.publish_snapshot(spot, vol);
+
+        let writer = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                for version in 2..500u64 {
+                    let mut spot = state.market.load().spot.clone();
+                    let mut vol = state.market.load().vol.clone();
+                    spot.insert("PAIR".into(), version as f64);
+                    vol.insert("PAIR".into(), version as f64);
+                    state.publish_snapshot(spot, vol);
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+
+        let mut readers = Vec::new();
+        for _ in 0..8 {
+            let state = state.clone();
+            readers.push(tokio::spawn(async move {
+                for _ in 0..2000 {
+                    let market = state.market.load();
+                    let spot = market.spot["PAIR"];
+                    let vol = market.vol["PAIR"];
+                    assert_eq!(
+                        spot, vol,
+                        "torn read: spot {spot} paired with vol {vol}"
+                    );
+                    tokio::task::yield_now().await;
+                }
+            }));
+        }
+
+        writer.await.unwrap();
+        for reader in readers {
+            reader.await.unwrap();
         }
 
         state.db.close().await;
