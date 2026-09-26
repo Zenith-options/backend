@@ -15,7 +15,13 @@ pub struct Position {
     pub wallet_address: String,
     pub underlying: String,
     pub strike: f64,
+    /// Deprecated: retained for backwards compatibility. Use `expires_at`
+    /// (absolute ISO-8601 UTC timestamp) to derive time-to-expiry.
     pub expiry_days: f64,
+    /// Absolute expiry timestamp in ISO-8601 UTC, backfilled as
+    /// `opened_at + expiry_days`. Time-to-expiry is derived from this and the
+    /// current clock, enabling real theta decay.
+    pub expires_at: String,
     pub option_type: String,
     pub position_type: String,
     pub contracts: f64,

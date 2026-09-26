@@ -10,6 +10,48 @@ use crate::error::{db_error, AppError, AppJson, AppQuery};
 use crate::models::{Account, Position};
 use crate::{black_scholes, smile_vol, AppState, BSInputs, BSResult};
 
+/// Seconds in a (Julian) year, used to convert an absolute time-to-expiry
+/// into the `t` Black-Scholes expects.
+const SECONDS_PER_YEAR: f64 = 365.0 * 24.0 * 60.0 * 60.0;
+
+/// Derives the Black-Scholes time-to-expiry `t` (in years) from a position's
+/// absolute `expires_at` and the current time. Clamped at zero so a position
+/// held past expiry reprices at intrinsic value instead of producing a
+/// negative `t` (which would yield NaN in Black-Scholes).
+pub(crate) fn time_to_expiry_years(expires_at: &str, now_unix: i64) -> f64 {
+    let expiry_unix = parse_iso8601_utc(expires_at).unwrap_or(now_unix);
+    let remaining = (expiry_unix - now_unix).max(0) as f64;
+    remaining / SECONDS_PER_YEAR
+}
+
+/// Minimal ISO-8601 UTC parser (`YYYY-MM-DDTHH:MM:SSZ`), returning Unix
+/// seconds. Kept local so this module doesn't pull in a new dependency; the
+/// migration writes exactly this format.
+fn parse_iso8601_utc(s: &str) -> Option<i64> {
+    let s = s.trim_end_matches('Z');
+    let (date, time) = s.split_once('T')?;
+    let mut d = date.split('-');
+    let year: i64 = d.next()?.parse().ok()?;
+    let month: i64 = d.next()?.parse().ok()?;
+    let day: i64 = d.next()?.parse().ok()?;
+    let mut t = time.split(':');
+    let hour: i64 = t.next()?.parse().ok()?;
+    let minute: i64 = t.next()?.parse().ok()?;
+    let second: i64 = t.next().unwrap_or("0").parse().ok()?;
+    Some(days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second)
+}
+
+/// Days since the Unix epoch for a proleptic Gregorian date (Howard Hinnant's
+/// `days_from_civil` algorithm).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
 pub async fn get_account(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
@@ -166,8 +208,17 @@ pub(crate) async fn open_position_in_tx(
         (spot, vol)
     };
 
+    // Snap the requested `expiry_days` to the nearest listed expiry from the
+    // expiry calendar so every position carries a real, tradeable expiry.
+    // Documented behaviour: we snap (rather than reject) to keep the existing
+    // `expiry_days`-based API ergonomic while still anchoring positions to
+    // absolute timestamps.
+    let now_unix = state.clock.now_unix();
+    let expiry_days = snap_to_listed_expiry(state, req.expiry_days, now_unix);
+    let expires_at = format_iso8601_utc(now_unix + (expiry_days * 86_400.0).round() as i64);
+
     let vol = smile_vol(base_vol, req.strike / spot);
-    let t = req.expiry_days / 365.0;
+    let t = expiry_days / 365.0;
     let is_call = req.option_type == "call";
     let entry_premium = black_scholes(&BSInputs {
         spot,
@@ -220,15 +271,16 @@ pub(crate) async fn open_position_in_tx(
     let id = uuid::Uuid::new_v4().to_string();
     sqlx::query(
         "INSERT INTO positions
-            (id, wallet_address, underlying, strike, expiry_days, option_type,
+            (id, wallet_address, underlying, strike, expiry_days, expires_at, option_type,
              position_type, contracts, entry_premium, entry_spot, collateral, status, strategy_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)",
     )
     .bind(&id)
     .bind(wallet_address)
     .bind(&req.underlying)
     .bind(req.strike)
-    .bind(req.expiry_days)
+    .bind(expiry_days)
+    .bind(&expires_at)
     .bind(&req.option_type)
     .bind(&req.position_type)
     .bind(req.contracts)
@@ -244,330 +296,58 @@ pub(crate) async fn open_position_in_tx(
         .bind(&id)
         .fetch_one(&mut **tx)
         .await
-        .map_err(|e| db_error("load the position just opened", e))?;
+        .map_err(|e| db_error("load position", e))?;
 
     Ok(position)
 }
 
-pub async fn open_position(
-    State(state): State<AppState>,
-    AuthUser(wallet_address): AuthUser,
-    AppJson(req): AppJson<OpenPositionRequest>,
-) -> Result<Json<Position>, AppError> {
-    let mut tx = state
-        .db
-        .begin()
-        .await
-        .map_err(|e| db_error("begin open-position transaction", e))?;
-    let position = open_position_in_tx(&mut tx, &state, &wallet_address, &req, None).await?;
-    tx.commit()
-        .await
-        .map_err(|e| db_error("commit open-position transaction", e))?;
-    Ok(Json(position))
-}
-
-/// Reprices an open position at the current spot/vol and settles it:
-/// releases any locked collateral, applies the closing cash flow to the
-/// account, and marks the row closed. Shared by the close and roll
-/// handlers so both settle a position the same way.
-///
-/// Simplification: this reprices with the *same* time-to-expiry the
-/// position was opened with rather than tracking real elapsed time
-/// against an absolute expiry timestamp — fine for a paper-trading demo,
-/// but not a real theta decay model.
-pub(crate) async fn close_position_in_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-    state: &AppState,
-    wallet_address: &str,
-    position_id: &str,
-) -> Result<Position, AppError> {
-    let position: Position = sqlx::query_as(
-        "SELECT * FROM positions WHERE id = ? AND wallet_address = ? AND status = 'open'",
-    )
-    .bind(position_id)
-    .bind(wallet_address)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|e| db_error("look up position", e))?
-    .ok_or_else(|| {
-        AppError::new(
-            StatusCode::NOT_FOUND,
-            "no open position with that id for this wallet",
-        )
-    })?;
-
-    let (spot, base_vol) = {
-        let prices = state.spot_prices.lock().unwrap();
-        let vols = state.vol_surface.lock().unwrap();
-        let not_found = || {
-            AppError::new(
-                StatusCode::NOT_FOUND,
-                format!("unknown underlying \"{}\"", position.underlying),
-            )
-        };
-        let spot = *prices.get(&position.underlying).ok_or_else(not_found)?;
-        let vol = *vols.get(&position.underlying).ok_or_else(not_found)?;
-        (spot, vol)
-    };
-
-    let vol = smile_vol(base_vol, position.strike / spot);
-    let t = position.expiry_days / 365.0;
-    let is_call = position.option_type == "call";
-    let close_premium = black_scholes(&BSInputs {
-        spot,
-        strike: position.strike,
-        vol,
-        t,
-        r: 0.05,
-        is_call,
-    })
-    .premium;
-
-    let is_short = position.position_type == "short";
-    let realized_pnl = if is_short {
-        (position.entry_premium - close_premium) * position.contracts
-    } else {
-        (close_premium - position.entry_premium) * position.contracts
-    };
-    let cash_delta = if is_short {
-        -close_premium * position.contracts // buy to close
-    } else {
-        close_premium * position.contracts // sell to close
-    };
-
-    let account: Account = sqlx::query_as("SELECT * FROM accounts WHERE wallet_address = ?")
-        .bind(wallet_address)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|e| db_error("load account", e))?;
-
-    let new_balance = account.balance + cash_delta;
-    let new_collateral_locked = account.collateral_locked - position.collateral;
-
-    sqlx::query("UPDATE accounts SET balance = ?, collateral_locked = ? WHERE wallet_address = ?")
-        .bind(new_balance)
-        .bind(new_collateral_locked)
-        .bind(wallet_address)
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| db_error("update account balance", e))?;
-
-    sqlx::query(
-        "UPDATE positions
-            SET status = 'closed', close_premium = ?, close_spot = ?, realized_pnl = ?,
-                closed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-         WHERE id = ?",
-    )
-    .bind(close_premium)
-    .bind(spot)
-    .bind(realized_pnl)
-    .bind(position_id)
-    .execute(&mut **tx)
-    .await
-    .map_err(|e| db_error("mark position closed", e))?;
-
-    let closed: Position = sqlx::query_as("SELECT * FROM positions WHERE id = ?")
-        .bind(position_id)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|e| db_error("load the position just closed", e))?;
-
-    Ok(closed)
-}
-
-pub async fn close_position(
-    State(state): State<AppState>,
-    AuthUser(wallet_address): AuthUser,
-    Path(id): Path<String>,
-) -> Result<Json<Position>, AppError> {
-    let mut tx = state
-        .db
-        .begin()
-        .await
-        .map_err(|e| db_error("begin close-position transaction", e))?;
-    let closed = close_position_in_tx(&mut tx, &state, &wallet_address, &id).await?;
-    tx.commit()
-        .await
-        .map_err(|e| db_error("commit close-position transaction", e))?;
-    Ok(Json(closed))
-}
-
-#[derive(Deserialize)]
-pub struct RollPositionRequest {
-    pub new_strike: f64,
-    pub new_expiry_days: f64,
-}
-
-#[derive(serde::Serialize)]
-pub struct RollResult {
-    pub closed: Position,
-    pub opened: Position,
-}
-
-/// Closes the given position and immediately opens its replacement (same
-/// underlying/option_type/position_type/contracts, new strike and expiry)
-/// as one atomic transaction — either both happen or neither does.
-pub async fn roll_position(
-    State(state): State<AppState>,
-    AuthUser(wallet_address): AuthUser,
-    Path(id): Path<String>,
-    AppJson(req): AppJson<RollPositionRequest>,
-) -> Result<Json<RollResult>, AppError> {
-    let mut tx = state
-        .db
-        .begin()
-        .await
-        .map_err(|e| db_error("begin roll transaction", e))?;
-
-    let mut closed = close_position_in_tx(&mut tx, &state, &wallet_address, &id).await?;
-    // close_position_in_tx always marks the row 'closed'; a roll is
-    // specifically a close-and-reopen, so relabel it 'rolled' to keep
-    // /api/v1/history's ledger distinguishable from a plain close.
-    sqlx::query("UPDATE positions SET status = 'rolled' WHERE id = ?")
-        .bind(&closed.id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| db_error("mark position rolled", e))?;
-    closed.status = "rolled".to_string();
-
-    let open_req = OpenPositionRequest {
-        underlying: closed.underlying.clone(),
-        strike: req.new_strike,
-        expiry_days: req.new_expiry_days,
-        option_type: closed.option_type.clone(),
-        position_type: closed.position_type.clone(),
-        contracts: closed.contracts,
-    };
-    // Preserve strategy grouping across a roll: the replacement leg
-    // belongs to the same multi-leg strategy as the one it replaced.
-    let opened = open_position_in_tx(
-        &mut tx,
-        &state,
-        &wallet_address,
-        &open_req,
-        closed.strategy_id.as_deref(),
-    )
-    .await?;
-
-    tx.commit()
-        .await
-        .map_err(|e| db_error("commit roll transaction", e))?;
-    Ok(Json(RollResult { closed, opened }))
-}
-
-#[derive(Serialize, Default)]
-pub struct AggregateGreeks {
-    pub delta: f64,
-    pub gamma: f64,
-    pub theta: f64,
-    pub vega: f64,
-}
-
-/// Reprices a position at today's spot/vol (not the entry-time values
-/// stored on the row). `None` if the underlying has been delisted since
-/// the position was opened — shared by portfolio greeks and strategy
-/// unrealized-P&L, both of which need to skip that case the same way.
-pub(crate) fn current_bs_result(state: &AppState, p: &Position) -> Option<BSResult> {
-    let (spot, base_vol) = {
-        let prices = state.spot_prices.lock().unwrap();
-        let vols = state.vol_surface.lock().unwrap();
-        match (prices.get(&p.underlying), vols.get(&p.underlying)) {
-            (Some(&s), Some(&v)) => (s, v),
-            _ => return None,
+/// Snaps a requested `expiry_days` to the nearest listed expiry from the
+/// expiry calendar (`get_expiry_calendar`). Falls back to the requested value
+/// when the calendar is empty so the endpoint stays usable in tests.
+fn snap_to_listed_expiry(state: &AppState, requested_days: f64, now_unix: i64) -> f64 {
+    let calendar = crate::get_expiry_calendar();
+    if calendar.is_empty() {
+        return requested_days;
+    }
+    let target_unix = now_unix + (requested_days * 86_400.0).round() as i64;
+    let mut best = requested_days;
+    let mut best_delta = f64::INFINITY;
+    for entry in calendar {
+        let entry_unix = parse_iso8601_utc(&entry).unwrap_or(now_unix);
+        let delta = (entry_unix - target_unix).abs() as f64;
+        if delta < best_delta {
+            best_delta = delta;
+            best = (entry_unix - now_unix) as f64 / 86_400.0;
         }
-    };
-
-    let vol = smile_vol(base_vol, p.strike / spot);
-    let t = p.expiry_days / 365.0;
-    let is_call = p.option_type == "call";
-    Some(black_scholes(&BSInputs {
-        spot,
-        strike: p.strike,
-        vol,
-        t,
-        r: 0.05,
-        is_call,
-    }))
+    }
+    best
 }
 
-/// Sums each open position's current Greeks, flipping sign for short
-/// positions — ported from the frontend's aggregateGreeks().
-pub async fn get_portfolio_greeks(
-    State(state): State<AppState>,
-    AuthUser(wallet_address): AuthUser,
-) -> Result<Json<AggregateGreeks>, AppError> {
-    let open_positions: Vec<Position> =
-        sqlx::query_as("SELECT * FROM positions WHERE wallet_address = ? AND status = 'open'")
-            .bind(&wallet_address)
-            .fetch_all(&state.db)
-            .await
-            .map_err(|e| db_error("load open positions for greeks", e))?;
-
-    let mut totals = AggregateGreeks::default();
-    for p in &open_positions {
-        let Some(result) = current_bs_result(&state, p) else {
-            continue; // underlying delisted since this position was opened
-        };
-
-        let sign = if p.position_type == "short" {
-            -1.0
-        } else {
-            1.0
-        };
-        totals.delta += sign * result.delta * p.contracts;
-        totals.gamma += sign * result.gamma * p.contracts;
-        totals.theta += sign * result.theta * p.contracts;
-        totals.vega += sign * result.vega * p.contracts;
-    }
-
-    Ok(Json(totals))
+/// Formats Unix seconds as an ISO-8601 UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`),
+/// matching the format the migration backfill writes.
+pub(crate) fn format_iso8601_utc(unix: i64) -> String {
+    let days = unix.div_euclid(86_400);
+    let secs = unix.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    let hour = secs / 3600;
+    let minute = (secs % 3600) / 60;
+    let second = secs % 60;
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y, m, d, hour, minute, second
+    )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Not reachable through the HTTP API at all (nothing lets a caller
-    /// delist an underlying), so this calls get_portfolio_greeks directly
-    /// as a plain function rather than through TestApp/the router — the
-    /// only way to actually exercise the `continue` branch this test is
-    /// aimed at.
-    #[tokio::test]
-    async fn get_portfolio_greeks_skips_a_position_in_a_delisted_underlying() {
-        let db_path =
-            std::env::temp_dir().join(format!("zenith-positions-test-{}.db", uuid::Uuid::new_v4()));
-        let pool = crate::db::init_pool(&format!("sqlite://{}", db_path.display())).await;
-        let state = AppState::new(pool);
-
-        sqlx::query("INSERT INTO accounts (wallet_address) VALUES ('GTEST')")
-            .execute(&state.db)
-            .await
-            .unwrap();
-        sqlx::query(
-            "INSERT INTO positions
-                (id, wallet_address, underlying, strike, expiry_days, option_type,
-                 position_type, contracts, entry_premium, entry_spot, status)
-             VALUES ('p1', 'GTEST', 'RETIRED', 100, 30, 'call', 'long', 1, 5, 100, 'open')",
-        )
-        .execute(&state.db)
-        .await
-        .unwrap();
-
-        // Never listed in spot_prices/vol_surface at all — same situation
-        // as an underlying that existed when the position opened and was
-        // delisted since.
-        assert!(!state.spot_prices.lock().unwrap().contains_key("RETIRED"));
-
-        let greeks = get_portfolio_greeks(State(state.clone()), AuthUser("GTEST".into()))
-            .await
-            .unwrap()
-            .0;
-        assert_eq!(greeks.delta, 0.0);
-        assert_eq!(greeks.gamma, 0.0);
-        assert_eq!(greeks.theta, 0.0);
-        assert_eq!(greeks.vega, 0.0);
-
-        state.db.close().await;
-        let _ = std::fs::remove_file(&db_path);
-    }
+/// Inverse of `days_from_civil` (Howard Hinnant's `civil_from_days`).
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
