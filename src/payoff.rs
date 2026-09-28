@@ -5,16 +5,30 @@
 use axum::http::StatusCode;
 use axum::response::Json;
 use serde::{Deserialize, Serialize};
+use validator::{Validate, ValidationError};
 
-use crate::error::AppError;
+use crate::error::{AppError, ValidatedJson};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Validate)]
 pub struct PricedLeg {
+    #[validate(custom(function = "valid_option_type"))]
     pub option_type: String,   // "call" | "put"
+    #[validate(custom(function = "valid_position_type"))]
     pub position_type: String, // "long" | "short" (long == frontend's "buy")
+    #[validate(range(min = 0.000001, max = 1000000000.0))]
     pub strike: f64,
+    #[validate(range(min = 0.000001, max = 1000000.0))]
     pub contracts: f64,
+    #[validate(range(min = 0.0, max = 1000000000.0))]
     pub premium: f64,
+}
+
+fn valid_option_type(value: &str) -> Result<(), ValidationError> {
+    if value == "call" || value == "put" { Ok(()) } else { Err(ValidationError::new("invalid_option_type")) }
+}
+
+fn valid_position_type(value: &str) -> Result<(), ValidationError> {
+    if value == "long" || value == "short" { Ok(()) } else { Err(ValidationError::new("invalid_position_type")) }
 }
 
 /// Net P&L across all legs at a given spot price at expiry.
@@ -72,12 +86,16 @@ pub fn net_premium(legs: &[PricedLeg]) -> f64 {
     })
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 pub struct PayoffRequest {
+    #[validate(length(min = 1, max = 50), nested)]
     pub legs: Vec<PricedLeg>,
+    #[validate(range(min = 0.000001, max = 1000000000.0))]
     pub lo_spot: f64,
+    #[validate(range(min = 0.000001, max = 1000000000.0))]
     pub hi_spot: f64,
     #[serde(default = "default_steps")]
+    #[validate(range(min = 1, max = 1000))]
     pub steps: u32,
 }
 
@@ -94,24 +112,15 @@ pub struct PayoffResponse {
 /// Stateless P&L math over caller-supplied legs (no pricing lookup, no
 /// auth) — the frontend's strategy builder already has each leg's
 /// premium from a prior /api/v1/price call before it needs this.
-pub async fn post_payoff(Json(req): Json<PayoffRequest>) -> Result<Json<PayoffResponse>, AppError> {
-    if req.legs.is_empty() {
-        return Err(AppError::new(
-            StatusCode::BAD_REQUEST,
-            "legs must not be empty",
-        ));
-    }
+pub async fn post_payoff(ValidatedJson(req): ValidatedJson<PayoffRequest>) -> Result<Json<PayoffResponse>, AppError> {
     if req.hi_spot <= req.lo_spot {
-        return Err(AppError::new(
-            StatusCode::BAD_REQUEST,
-            "hi_spot must be greater than lo_spot",
-        ));
-    }
-    if req.steps == 0 {
-        return Err(AppError::new(
-            StatusCode::BAD_REQUEST,
-            "steps must be positive",
-        ));
+        return Err(AppError::new(StatusCode::UNPROCESSABLE_ENTITY, "request validation failed")
+            .with_details(serde_json::json!({
+                "fields": [{
+                    "field": "hi_spot",
+                    "errors": ["hi_spot must exceed lo_spot"]
+                }]
+            })));
     }
 
     let points = combined_payoff_series(&req.legs, req.lo_spot, req.hi_spot, req.steps);

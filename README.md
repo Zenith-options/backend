@@ -44,6 +44,7 @@ All `/api/v1/*` endpoints marked **auth** require an
 | `GET /health` | Liveness + a DB ping |
 | `GET /api/v1/spot` | Current spot prices + base vols for all underlyings |
 | `GET /api/v1/price` | Black-Scholes premium/Greeks for one option |
+| `POST /api/v1/price/batch` | Price up to 500 options/strategy legs concurrently against one market snapshot; each item includes its result or error |
 | `GET /api/v1/iv` | Implied vol for a given market price (Newton-Raphson) |
 | `GET /api/v1/chain` | Full option chain (calls+puts) across strikes for one expiry |
 | `GET /api/v1/expiries/:underlying` | Available expiries for an underlying |
@@ -58,6 +59,25 @@ All `/api/v1/*` endpoints marked **auth** require an
 | `POST /api/v1/auth/nonce` | Issue a single-use, 5-minute sign-in message for a wallet address |
 | `POST /api/v1/auth/verify` | Verify the signed message, get a 24h bearer session token |
 | `GET /api/v1/auth/me` **auth** | Confirm the current token's wallet address |
+| `POST /api/v1/auth/keys` **session auth** | Create a labeled API key with `read`, `trade`, and/or `alerts` scopes, optional exact-IP allowlist, and optional RFC3339 expiry |
+| `DELETE /api/v1/auth/keys/:id` **auth** | Revoke one of the wallet's API keys |
+
+The API key secret is returned only when the key is created. Signed key
+requests use `X-API-Key`, `X-API-Timestamp` (Unix seconds), and
+`X-API-Signature`; they do not use the key secret as a bearer token. The
+signature is lowercase hex HMAC-SHA256 over
+`METHOD + "\\n" + PATH_AND_QUERY + "\\n" + TIMESTAMP + "\\n" + HEX_SHA256_BODY`.
+Timestamps more than five minutes from server time are rejected. Market
+pricing and payoff endpoints require `read`; writes require `trade`, and
+alert operations require `alerts`. Interactive session bearer tokens
+continue to work for wallet-authenticated routes.
+
+Market-data GET responses and batch pricing use strong ETags and public
+short-lived caching; matching `If-None-Match` values return 304. Account
+responses use `private, no-store`. Responses over 1 KiB negotiate gzip,
+Brotli, or Zstandard when supported by the client. JSON and query DTOs are
+validated before handlers run; constraint violations return 422 with
+field-level errors.
 
 Every `POST` below (positions open/close/roll, watchlist/alerts create,
 strategies/execute) is rate-limited per-IP (5/s, burst 20) on top of

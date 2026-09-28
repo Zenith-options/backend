@@ -128,6 +128,40 @@ impl TestApp {
             .await
     }
 
+    pub async fn signed_post(
+        &self,
+        path: &str,
+        body: Value,
+        key_id: &str,
+        secret_hex: &str,
+    ) -> (StatusCode, Value) {
+        use hmac::{Hmac, Mac};
+        use sha2::{Digest, Sha256};
+
+        let body = body.to_string();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let body_hash = data_encoding::HEXLOWER.encode(&Sha256::digest(body.as_bytes()));
+        let canonical = format!("POST\n{path}\n{timestamp}\n{body_hash}");
+        let secret = data_encoding::HEXLOWER.decode(secret_hex.as_bytes()).unwrap();
+        let mut mac = Hmac::<Sha256>::new_from_slice(&secret).unwrap();
+        mac.update(canonical.as_bytes());
+        let signature = data_encoding::HEXLOWER.encode(&mac.finalize().into_bytes());
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .header("x-api-key", key_id)
+            .header("x-api-timestamp", timestamp.to_string())
+            .header("x-api-signature", signature)
+            .body(Body::from(body))
+            .unwrap();
+        self.send(req).await
+    }
+
     pub async fn delete_with(&self, path: &str, token: &str) -> (StatusCode, Value) {
         let req = Request::builder()
             .method("DELETE")
