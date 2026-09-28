@@ -25,6 +25,13 @@ pub fn tick_once(state: &AppState) -> String {
     };
     let vols = state.vol_surface.lock().unwrap().clone();
 
+    // Bump the market snapshot version so cached market data (chains,
+    // surfaces, expiries, stats) keyed by the previous version becomes
+    // unreachable — no explicit invalidation needed.
+    state
+        .market_version
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
     let payload = serde_json::json!({ "prices": prices, "vols": vols }).to_string();
     let _ = state.spot_tx.send(payload.clone());
     payload

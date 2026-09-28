@@ -52,6 +52,10 @@ pub async fn execute_strategy(
     tx.commit()
         .await
         .map_err(|e| db_error("commit strategy transaction", e))?;
+    state
+        .cache
+        .remove(&format!("readiness:{wallet_address}"))
+        .await;
     Ok(Json(opened))
 }
 
@@ -244,6 +248,10 @@ pub async fn close_strategy(
     tx.commit()
         .await
         .map_err(|e| db_error("commit close-strategy transaction", e))?;
+    state
+        .cache
+        .remove(&format!("readiness:{wallet_address}"))
+        .await;
     Ok(Json(closed))
 }
 

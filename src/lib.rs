@@ -14,6 +14,7 @@ use tower_http::trace::TraceLayer;
 
 pub mod alerts;
 pub mod auth;
+pub mod cache;
 pub mod collateral;
 pub mod db;
 pub mod error;
@@ -24,6 +25,7 @@ pub mod positions;
 pub mod prices;
 pub mod rate_limit_key;
 pub mod request_id;
+pub mod settings;
 pub mod strategies;
 pub mod strkey;
 pub mod watchlist;
@@ -82,7 +84,7 @@ pub struct BSInputs {
     pub is_call: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BSResult {
     pub premium: f64,
     pub delta: f64,
@@ -237,6 +239,13 @@ pub struct AppState {
     /// expected and ignored — the simulator runs regardless of whether
     /// anyone's listening.
     pub spot_tx: tokio::sync::broadcast::Sender<String>,
+    /// Bumped on every price-simulator tick. Embedded in market-data cache
+    /// keys so a new tick makes the previous tick's entries unreachable —
+    /// no explicit invalidation needed for market data.
+    pub market_version: Arc<std::sync::atomic::AtomicU64>,
+    /// Cache for expensive, shareable computations (option chains, the
+    /// spot/vol surface, expiry calendars, protocol stats, wallet readiness).
+    pub cache: crate::cache::CacheService,
 }
 
 impl AppState {
@@ -260,6 +269,8 @@ impl AppState {
             vol_surface: Arc::new(std::sync::Mutex::new(vols)),
             db,
             spot_tx,
+            market_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            cache: crate::settings::Settings::from_env().build_cache(),
         }
     }
 }
@@ -288,7 +299,7 @@ pub struct IvResult {
     pub implied_vol: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct OptionChainEntry {
     pub strike: f64,
     pub expiry_days: f64,
@@ -304,7 +315,7 @@ pub struct ChainQuery {
     pub expiry_days: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct ExpiryCalendar {
     pub underlying: String,
     pub spot: f64,
@@ -312,17 +323,29 @@ pub struct ExpiryCalendar {
     pub expiries: Vec<ExpiryInfo>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct ExpiryInfo {
     pub days_to_expiry: u32,
     pub label: String,
     pub timestamp: u64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct SpotResponse {
     pub prices: std::collections::HashMap<String, f64>,
     pub vols: std::collections::HashMap<String, f64>,
+}
+
+/// A wallet's trading readiness: whether its account can currently take on
+/// new positions (available buying power is non-negative). Keyed by wallet in
+/// the cache and invalidated on every trade that moves balance/collateral.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct WalletReadiness {
+    pub wallet_address: String,
+    pub balance: f64,
+    pub collateral_locked: f64,
+    pub available_buying_power: f64,
+    pub ready: bool,
 }
 
 // ─── Route Handlers ───────────────────────────────────────────────────────────
@@ -350,9 +373,62 @@ async fn health(State(state): State<AppState>) -> Result<Json<serde_json::Value>
 }
 
 async fn get_spot(State(state): State<AppState>) -> Json<SpotResponse> {
-    let prices = state.spot_prices.lock().unwrap().clone();
-    let vols = state.vol_surface.lock().unwrap().clone();
-    Json(SpotResponse { prices, vols })
+    // The spot/vol surface is identical for every user between ticks, so it
+    // is cached per market snapshot version — a new tick changes the key and
+    // the old entry is simply not looked up again.
+    let version = state.market_version.load(std::sync::atomic::Ordering::SeqCst);
+    let key = format!("spot:{version}");
+    let response = state
+        .cache
+        .get_or_compute("surface", &key, || async {
+            let prices = state.spot_prices.lock().unwrap().clone();
+            let vols = state.vol_surface.lock().unwrap().clone();
+            SpotResponse { prices, vols }
+        })
+        .await;
+    Json(response)
+}
+
+/// Computes a wallet's trading readiness from its account. Returns `None` if
+/// the wallet has no account row yet. Uses the same checked query as
+/// `get_account` (the `wallet_address!` override handles the TEXT-PK nullability
+/// quirk), so no extra offline metadata is needed.
+async fn compute_wallet_readiness(state: &AppState, wallet_address: &str) -> Option<WalletReadiness> {
+    let account: Account = sqlx::query_as!(
+        Account,
+        "SELECT wallet_address AS \"wallet_address!\", balance, collateral_locked, created_at FROM accounts WHERE wallet_address = ?",
+        wallet_address
+    )
+    .fetch_optional(&state.db)
+    .await
+    .ok()?
+    .map(|a| a)?;
+    let available = account.balance - account.collateral_locked;
+    Some(WalletReadiness {
+        wallet_address: wallet_address.to_string(),
+        balance: account.balance,
+        collateral_locked: account.collateral_locked,
+        available_buying_power: available,
+        ready: available >= 0.0,
+    })
+}
+
+/// A wallet's trading readiness, cached per-wallet (not per snapshot version —
+/// it changes when the wallet trades, so it is invalidated on every trade that
+/// moves balance/collateral rather than relying on the market version).
+async fn get_wallet_readiness(
+    State(state): State<AppState>,
+    AuthUser(wallet_address): AuthUser,
+) -> Result<Json<WalletReadiness>, AppError> {
+    let key = format!("readiness:{wallet_address}");
+    let readiness = state
+        .cache
+        .get_or_compute("readiness", &key, || async {
+            compute_wallet_readiness(&state, &wallet_address).await
+        })
+        .await
+        .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, "no account for this wallet"))?;
+    Ok(Json(readiness))
 }
 
 async fn price_option(
@@ -380,15 +456,15 @@ async fn price_option(
     Ok(Json(result))
 }
 
-async fn get_chain(
-    State(state): State<AppState>,
-    AppQuery(q): AppQuery<ChainQuery>,
-) -> Result<Json<Vec<OptionChainEntry>>, StatusCode> {
+/// Computes the full option chain for `q` against the current spot/vol.
+/// Assumes `q.underlying` is listed — the handler checks before caching, so a
+/// 404 is never cached as a market-data miss.
+async fn compute_chain(state: &AppState, q: &ChainQuery) -> Vec<OptionChainEntry> {
     let prices = state.spot_prices.lock().unwrap();
     let vols = state.vol_surface.lock().unwrap();
 
-    let spot = *prices.get(&q.underlying).ok_or(StatusCode::NOT_FOUND)?;
-    let base_vol = *vols.get(&q.underlying).ok_or(StatusCode::NOT_FOUND)?;
+    let spot = *prices.get(&q.underlying).expect("underlying checked before caching");
+    let base_vol = *vols.get(&q.underlying).expect("underlying checked before caching");
     let t = q.expiry_days / 365.0;
     let r = 0.05_f64;
 
@@ -436,6 +512,34 @@ async fn get_chain(
         });
     }
 
+    chain
+}
+
+async fn get_chain(
+    State(state): State<AppState>,
+    AppQuery(q): AppQuery<ChainQuery>,
+) -> Result<Json<Vec<OptionChainEntry>>, StatusCode> {
+    // Reject an unknown underlying before caching — a 404 is not cacheable
+    // market data.
+    {
+        let prices = state.spot_prices.lock().unwrap();
+        let vols = state.vol_surface.lock().unwrap();
+        if !prices.contains_key(&q.underlying) || !vols.contains_key(&q.underlying) {
+            return Err(StatusCode::NOT_FOUND);
+        }
+    }
+
+    // The chain is identical for every user between ticks, so it is cached
+    // per market snapshot version — a new tick changes the key and the old
+    // entry is simply not looked up again.
+    let version = state.market_version.load(std::sync::atomic::Ordering::SeqCst);
+    let key = format!("chain:{}:{}:{}", q.underlying, q.expiry_days, version);
+    let chain = state
+        .cache
+        .get_or_compute("chain", &key, || async {
+            compute_chain(&state, &q).await
+        })
+        .await;
     Ok(Json(chain))
 }
 
@@ -455,15 +559,17 @@ async fn get_implied_vol(
     Ok(Json(IvResult { implied_vol: iv }))
 }
 
-async fn get_expiry_calendar(
-    State(state): State<AppState>,
-    Path(underlying): Path<String>,
-) -> Result<Json<ExpiryCalendar>, StatusCode> {
+/// Computes the expiry calendar for `underlying` against the current
+/// spot/vol. Assumes the underlying is listed (the handler checks first).
+async fn compute_expiry_calendar(
+    state: &AppState,
+    underlying: &str,
+) -> ExpiryCalendar {
     let prices = state.spot_prices.lock().unwrap();
     let vols = state.vol_surface.lock().unwrap();
 
-    let spot = *prices.get(&underlying).ok_or(StatusCode::NOT_FOUND)?;
-    let vol = *vols.get(&underlying).ok_or(StatusCode::NOT_FOUND)?;
+    let spot = *prices.get(underlying).expect("underlying checked before caching");
+    let vol = *vols.get(underlying).expect("underlying checked before caching");
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -479,25 +585,60 @@ async fn get_expiry_calendar(
         })
         .collect();
 
-    Ok(Json(ExpiryCalendar {
-        underlying,
+    ExpiryCalendar {
+        underlying: underlying.to_string(),
         spot,
         vol,
         expiries,
-    }))
+    }
+}
+
+async fn get_expiry_calendar(
+    State(state): State<AppState>,
+    Path(underlying): Path<String>,
+) -> Result<Json<ExpiryCalendar>, StatusCode> {
+    // Reject an unknown underlying before caching.
+    {
+        let prices = state.spot_prices.lock().unwrap();
+        let vols = state.vol_surface.lock().unwrap();
+        if !prices.contains_key(&underlying) || !vols.contains_key(&underlying) {
+            return Err(StatusCode::NOT_FOUND);
+        }
+    }
+
+    let version = state.market_version.load(std::sync::atomic::Ordering::SeqCst);
+    let key = format!("expiries:{underlying}:{version}");
+    let calendar = state
+        .cache
+        .get_or_compute("expiries", &key, || async {
+            compute_expiry_calendar(&state, &underlying).await
+        })
+        .await;
+    Ok(Json(calendar))
 }
 
 async fn get_protocol_stats(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let prices = state.spot_prices.lock().unwrap();
-    Json(serde_json::json!({
-        "total_series": 28,
-        "active_series": 16,
-        "total_premium_volume": 284_700.0,
-        "open_interest": 1_420_000.0,
-        "unique_traders": 312,
-        "markets": prices.keys().collect::<Vec<_>>(),
-        "network": "stellar-testnet"
-    }))
+    // Protocol stats are mocked constants today, but they are exactly the
+    // kind of expensive-to-recompute, shareable value the cache exists for;
+    // key them by the snapshot version like the rest of the market data.
+    let version = state.market_version.load(std::sync::atomic::Ordering::SeqCst);
+    let key = format!("stats:{version}");
+    let stats = state
+        .cache
+        .get_or_compute("stats", &key, || async {
+            let prices = state.spot_prices.lock().unwrap();
+            serde_json::json!({
+                "total_series": 28,
+                "active_series": 16,
+                "total_premium_volume": 284_700.0,
+                "open_interest": 1_420_000.0,
+                "unique_traders": 312,
+                "markets": prices.keys().collect::<Vec<_>>(),
+                "network": "stellar-testnet"
+            })
+        })
+        .await;
+    Json(stats)
 }
 
 // ─── App wiring ───────────────────────────────────────────────────────────────
@@ -629,6 +770,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(mutation_rate_limited_routes())
         .route("/api/v1/auth/me", get(auth::get_me))
         .route("/api/v1/account", get(positions::get_account))
+        .route("/api/v1/wallet/readiness", get(get_wallet_readiness))
         .route("/api/v1/positions", get(positions::list_positions))
         .route("/api/v1/history", get(history::get_history))
         .route("/api/v1/watchlist", get(watchlist::get_watchlist))

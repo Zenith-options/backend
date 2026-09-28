@@ -68,6 +68,7 @@ requiring a session — see `mutation_rate_limited_routes()` in `lib.rs`.
 | Endpoint | What it does |
 |---|---|
 | `GET /api/v1/account` | Balance + locked collateral |
+| `GET /api/v1/wallet/readiness` | Balance, locked collateral, available buying power and whether the wallet can currently trade (cached per-wallet, invalidated on every trade) |
 | `GET /api/v1/positions` | List positions (`?status=`, `?strategy_id=`, `?limit=`, `?offset=`) |
 | `POST /api/v1/positions/open` | Price and open one position |
 | `POST /api/v1/positions/:id/close` | Settle an open position at current spot/vol |
@@ -124,6 +125,18 @@ tests/
 `zenith_backend` library crate, which is what lets `tests/*_test.rs`
 exercise the real router without a bin-only crate's usual restriction
 (a `tests/` directory can only see a *library* crate's public items).
+
+### A note on the cache
+
+Expensive, shareable computations (option chains, the spot/vol surface,
+expiry calendars, protocol stats) are cached per **market snapshot version** —
+a counter bumped on every price-simulator tick — so a new tick makes the
+previous tick's entries unreachable with no explicit invalidation. Wallet
+readiness is the exception: it is keyed by wallet and invalidated on every
+trade that moves balance/collateral. The backend is moka (in-process, the
+default) or Redis, configured via `ZENITH_CACHE` / `ZENITH_REDIS_URL`; a Redis
+outage degrades to computing on every request rather than erroring. See
+`src/cache.rs` and `docs/sqlx-offline.md`.
 
 ### A note on the pricing model
 

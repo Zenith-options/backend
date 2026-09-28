@@ -268,6 +268,12 @@ pub async fn open_position(
     tx.commit()
         .await
         .map_err(|e| db_error("commit open-position transaction", e))?;
+    // The trade moved balance/collateral; drop the cached readiness so the
+    // next read reflects the new account state.
+    state
+        .cache
+        .remove(&format!("readiness:{wallet_address}"))
+        .await;
     Ok(Json(position))
 }
 
@@ -400,6 +406,10 @@ pub async fn close_position(
     tx.commit()
         .await
         .map_err(|e| db_error("commit close-position transaction", e))?;
+    state
+        .cache
+        .remove(&format!("readiness:{wallet_address}"))
+        .await;
     Ok(Json(closed))
 }
 
@@ -462,6 +472,10 @@ pub async fn roll_position(
     tx.commit()
         .await
         .map_err(|e| db_error("commit roll transaction", e))?;
+    state
+        .cache
+        .remove(&format!("readiness:{wallet_address}"))
+        .await;
     Ok(Json(RollResult { closed, opened }))
 }
 
