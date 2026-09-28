@@ -133,6 +133,15 @@ pub(crate) async fn open_position_in_tx(
     req: &OpenPositionRequest,
     strategy_id: Option<&str>,
 ) -> Result<Position, AppError> {
+    if crate::admin::trading_circuit_tripped(&state.db)
+        .await
+        .map_err(|e| db_error("check trading circuit breaker", e))?
+    {
+        return Err(AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "trading is temporarily paused by a circuit breaker",
+        ));
+    }
     if req.contracts <= 0.0 || req.strike <= 0.0 || req.expiry_days <= 0.0 {
         return Err(AppError::new(
             StatusCode::BAD_REQUEST,

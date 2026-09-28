@@ -12,6 +12,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::request_id::{PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 
+pub mod admin;
 pub mod alerts;
 pub mod auth;
 pub mod collateral;
@@ -530,6 +531,9 @@ pub async fn init_state() -> AppState {
     let pool = db::init_pool(&database_url).await;
 
     let state = AppState::new(pool);
+    admin::bootstrap_super_admins(&state.db)
+        .await
+        .expect("failed to bootstrap super-admin wallets");
     state
         .feature_flags
         .refresh(&state.db)
@@ -637,6 +641,44 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/expiries/:underlying", get(get_expiry_calendar))
         .route("/api/v1/stats", get(get_protocol_stats))
         .route("/api/v1/features", get(features::get_features))
+        .route(
+            "/api/v1/admin/auth/step-up/nonce",
+            post(admin::post_step_up_nonce),
+        )
+        .route(
+            "/api/v1/admin/auth/step-up/verify",
+            post(admin::post_step_up_verify),
+        )
+        .route("/api/v1/admin/features", get(admin::get_admin_features))
+        .route(
+            "/api/v1/admin/features/:name",
+            axum::routing::put(admin::put_admin_feature).delete(admin::delete_admin_feature),
+        )
+        .route(
+            "/api/v1/admin/series",
+            get(admin::get_series).post(admin::post_series),
+        )
+        .route(
+            "/api/v1/admin/series/:id",
+            axum::routing::delete(admin::delete_series),
+        )
+        .route(
+            "/api/v1/admin/circuit-breakers",
+            get(admin::get_circuit_breakers),
+        )
+        .route(
+            "/api/v1/admin/circuit-breakers/:name",
+            axum::routing::put(admin::put_circuit_breaker),
+        )
+        .route("/api/v1/admin/users/:wallet", get(admin::get_user))
+        .route(
+            "/api/v1/admin/users/:wallet/roles",
+            post(admin::post_user_role),
+        )
+        .route(
+            "/api/v1/admin/users/:wallet/roles/:role",
+            axum::routing::delete(admin::delete_user_role),
+        )
         .merge(auth_rate_limited_routes())
         .merge(mutation_rate_limited_routes())
         .route("/api/v1/auth/me", get(auth::get_me))

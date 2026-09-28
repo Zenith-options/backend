@@ -21,6 +21,13 @@ use tower::ServiceExt;
 pub struct TestApp {
     router: axum::Router,
     db_path: std::path::PathBuf,
+    pub db: sqlx::SqlitePool,
+}
+
+pub struct TestIdentity {
+    pub token: String,
+    pub wallet_address: String,
+    pub signing_key: SigningKey,
 }
 
 impl Drop for TestApp {
@@ -34,10 +41,11 @@ impl TestApp {
         let db_path = std::env::temp_dir().join(format!("zenith-test-{}.db", uuid::Uuid::new_v4()));
         let database_url = format!("sqlite://{}", db_path.display());
         let pool = zenith_backend::db::init_pool(&database_url).await;
-        let state = zenith_backend::AppState::new(pool);
+        let state = zenith_backend::AppState::new(pool.clone());
         Self {
             router: zenith_backend::build_router(state),
             db_path,
+            db: pool,
         }
     }
 
@@ -141,6 +149,10 @@ impl TestApp {
     /// Full sign-in-with-wallet flow for a fresh random keypair, returning
     /// a bearer token ready to use in Authorization headers.
     pub async fn login(&self) -> String {
+        self.login_identity().await.token
+    }
+
+    pub async fn login_identity(&self) -> TestIdentity {
         let mut seed = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut seed);
         let signing_key = SigningKey::from_bytes(&seed);
@@ -151,7 +163,7 @@ impl TestApp {
         let (_, nonce_resp) = self
             .post(
                 "/api/v1/auth/nonce",
-                serde_json::json!({ "wallet_address": address }),
+                serde_json::json!({ "wallet_address": &address }),
             )
             .await;
         let message = nonce_resp["message"].as_str().unwrap();
@@ -161,9 +173,13 @@ impl TestApp {
         let (_, verify_resp) = self
             .post(
                 "/api/v1/auth/verify",
-                serde_json::json!({ "wallet_address": address, "message": message, "signature": sig_b64 }),
+                serde_json::json!({ "wallet_address": &address, "message": message, "signature": sig_b64 }),
             )
             .await;
-        verify_resp["token"].as_str().unwrap().to_string()
+        TestIdentity {
+            token: verify_resp["token"].as_str().unwrap().to_string(),
+            wallet_address: address,
+            signing_key,
+        }
     }
 }

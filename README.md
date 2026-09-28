@@ -93,6 +93,27 @@ Alerts are checked against spot every 10s by a background task; a
 triggered alert stays in the table (visible via GET) rather than being
 deleted.
 
+### Administration **auth**
+
+Admin access is granted to wallet addresses with the roles `viewer`,
+`operator`, `risk_admin`, or `super_admin` (higher roles inherit lower
+role capabilities). Set `ZENITH_SUPER_ADMIN_WALLETS` to a comma-separated
+list of initial super-admin wallets. Admin reads require the viewer role;
+mutations require an appropriate role and a wallet-signature step-up
+challenge, valid for ten minutes.
+
+| Endpoint | What it does |
+|---|---|
+| `POST /api/v1/admin/auth/step-up/nonce` and `/verify` | Re-authenticate the session wallet with a fresh signature |
+| `GET /api/v1/admin/features`, `PUT` / `DELETE /:name` | View and manage environment-scoped feature flags |
+| `GET` / `POST /api/v1/admin/series`, `DELETE /:id` | Manage configured option series |
+| `GET` / `PUT /api/v1/admin/circuit-breakers/:name` | Inspect or trip/reset the trading circuit breaker |
+| `GET /api/v1/admin/users/:wallet` | Look up account creation and assigned admin roles |
+| `POST /api/v1/admin/users/:wallet/roles`, `DELETE /roles/:role` | Grant/revoke roles (super_admin only) |
+
+The `trading` circuit breaker pauses new position and strategy opens;
+closing existing positions remains available.
+
 Every response carries an `x-request-id` header — a fresh UUIDv4 if the
 request didn't already have one, or the caller's own value echoed back
 unchanged otherwise — for tracing a single request through logs.
