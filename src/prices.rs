@@ -26,6 +26,7 @@ pub fn tick_once(state: &AppState) -> String {
     let vols = state.vol_surface.lock().unwrap().clone();
 
     let payload = serde_json::json!({ "prices": prices, "vols": vols }).to_string();
+    state.operations.market_data_updated();
     let _ = state.spot_tx.send(payload.clone());
     payload
 }
@@ -39,6 +40,7 @@ pub async fn price_simulator_loop(state: AppState) {
     loop {
         interval.tick().await;
         tick_once(&state);
+        state.operations.background_loop_succeeded("price_simulator");
     }
 }
 

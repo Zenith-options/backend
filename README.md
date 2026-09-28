@@ -41,7 +41,9 @@ All `/api/v1/*` endpoints marked **auth** require an
 
 | Endpoint | What it does |
 |---|---|
-| `GET /health` | Liveness + a DB ping |
+| `GET /livez` | Liveness only; does not check dependencies |
+| `GET /readyz` | Readiness: database, current migrations, fresh market data, and not draining |
+| `GET /health/details` **auth** | Authenticated dependency statuses, check latency, and last error |
 | `GET /api/v1/spot` | Current spot prices + base vols for all underlyings |
 | `GET /api/v1/price` | Black-Scholes premium/Greeks for one option |
 | `GET /api/v1/iv` | Implied vol for a given market price (Newton-Raphson) |

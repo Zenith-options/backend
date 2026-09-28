@@ -259,21 +259,25 @@ pub async fn sweep_expired(db: &sqlx::SqlitePool) -> Result<(u64, u64), sqlx::Er
 /// Sweeps expired nonces and sessions every 5 minutes. Neither table is
 /// large or hot enough to need anything fancier than a periodic DELETE;
 /// this just keeps them from growing forever.
-pub async fn cleanup_expired_loop(db: sqlx::SqlitePool) {
+pub async fn cleanup_expired_loop(state: crate::AppState) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
     loop {
         interval.tick().await;
 
-        match sweep_expired(&db).await {
+        match sweep_expired(&state.db).await {
             Ok((n, s)) if n > 0 || s > 0 => {
+                state.operations.background_loop_succeeded("auth_cleanup");
                 tracing::info!(
                     expired_nonces = n,
                     expired_sessions = s,
                     "swept expired auth rows"
                 );
             }
-            Ok(_) => {}
+            Ok(_) => state.operations.background_loop_succeeded("auth_cleanup"),
             Err(e) => {
+                state
+                    .operations
+                    .background_loop_failed("auth_cleanup", e.to_string());
                 tracing::warn!(error = %e, "auth cleanup sweep failed");
             }
         }

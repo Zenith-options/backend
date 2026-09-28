@@ -10,11 +10,12 @@ async fn main() {
     // Needed for SmartIpKeyExtractor's peer-IP fallback (used when no
     // x-forwarded-for/x-real-ip/forwarded header is present) to have a
     // real socket address to read, rather than nothing at all.
+    let shutdown_state = state.clone();
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(zenith_backend::shutdown_signal())
+    .with_graceful_shutdown(zenith_backend::shutdown_signal(shutdown_state))
     .await
     .unwrap();
 }

@@ -111,6 +111,7 @@ pub async fn delete_alert(
 pub async fn check_once(state: &AppState) -> u64 {
     let prices = state.spot_prices.lock().unwrap().clone();
     let mut total_fired = 0;
+    let mut failed = false;
     for (underlying, spot) in prices {
         let result = sqlx::query(
             "UPDATE alerts
@@ -136,8 +137,17 @@ pub async fn check_once(state: &AppState) -> u64 {
                 total_fired += r.rows_affected();
             }
             Ok(_) => {}
-            Err(e) => tracing::warn!(error = %e, "alert check failed"),
+            Err(e) => {
+                failed = true;
+                state
+                    .operations
+                    .background_loop_failed("alert_checks", e.to_string());
+                tracing::warn!(error = %e, "alert check failed");
+            }
         }
+    }
+    if !failed {
+        state.operations.background_loop_succeeded("alert_checks");
     }
     total_fired
 }

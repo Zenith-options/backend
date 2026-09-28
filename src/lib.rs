@@ -18,6 +18,7 @@ pub mod collateral;
 pub mod db;
 pub mod error;
 pub mod history;
+pub mod health;
 pub mod models;
 pub mod payoff;
 pub mod positions;
@@ -231,6 +232,7 @@ pub struct AppState {
     pub spot_prices: Arc<std::sync::Mutex<std::collections::HashMap<String, f64>>>,
     pub vol_surface: Arc<std::sync::Mutex<std::collections::HashMap<String, f64>>>,
     pub db: sqlx::SqlitePool,
+    pub operations: health::OperationalState,
     /// Broadcasts a JSON-encoded SpotResponse every time the price
     /// simulator nudges spot_prices, for the /api/v1/ws/spot handler to
     /// forward to connected clients. `send` errors (no receivers) are
@@ -259,6 +261,7 @@ impl AppState {
             spot_prices: Arc::new(std::sync::Mutex::new(prices)),
             vol_surface: Arc::new(std::sync::Mutex::new(vols)),
             db,
+            operations: health::OperationalState::new(),
             spot_tx,
         }
     }
@@ -326,28 +329,6 @@ pub struct SpotResponse {
 }
 
 // ─── Route Handlers ───────────────────────────────────────────────────────────
-
-/// Pings the database as part of the health check — a load balancer or
-/// orchestrator should see this fail (and stop routing traffic here) if
-/// the pool is exhausted or the file's gone missing, not just get a
-/// hollow "ok" that only proves the HTTP server itself is up.
-async fn health(State(state): State<AppState>) -> Result<Json<serde_json::Value>, error::AppError> {
-    sqlx::query("SELECT 1")
-        .execute(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "health check: database unavailable");
-            error::AppError::new(StatusCode::SERVICE_UNAVAILABLE, "database unavailable")
-        })?;
-
-    Ok(Json(serde_json::json!({
-        "status": "ok",
-        "service": "zenith-backend",
-        "version": "0.1.0",
-        "network": "stellar-testnet",
-        "database": "ok"
-    })))
-}
 
 async fn get_spot(State(state): State<AppState>) -> Json<SpotResponse> {
     let prices = state.spot_prices.lock().unwrap().clone();
@@ -525,7 +506,7 @@ pub async fn init_state() -> AppState {
     let pool = db::init_pool(&database_url).await;
 
     let state = AppState::new(pool);
-    tokio::spawn(auth::cleanup_expired_loop(state.db.clone()));
+    tokio::spawn(auth::cleanup_expired_loop(state.clone()));
     tokio::spawn(alerts::check_alerts_loop(state.clone()));
     tokio::spawn(prices::price_simulator_loop(state.clone()));
     state
@@ -618,7 +599,9 @@ pub fn build_router(state: AppState) -> Router {
         .allow_headers(Any);
 
     Router::new()
-        .route("/health", get(health))
+        .route("/livez", get(health::livez))
+        .route("/readyz", get(health::readyz))
+        .route("/health/details", get(health::details))
         .route("/api/v1/spot", get(get_spot))
         .route("/api/v1/price", get(price_option))
         .route("/api/v1/iv", get(get_implied_vol))
@@ -662,7 +645,7 @@ pub fn build_router(state: AppState) -> Router {
 /// Waits for Ctrl+C or SIGTERM so axum stops accepting new connections
 /// and finishes in-flight requests instead of dropping them mid-response
 /// on a container stop/redeploy.
-pub async fn shutdown_signal() {
+pub async fn shutdown_signal(state: AppState) {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await
@@ -683,6 +666,7 @@ pub async fn shutdown_signal() {
         _ = ctrl_c => {}
         _ = terminate => {}
     }
+    state.operations.set_draining();
     tracing::info!("shutdown signal received, draining in-flight requests");
 }
 
