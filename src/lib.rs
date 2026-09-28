@@ -332,8 +332,8 @@ pub struct SpotResponse {
 /// the pool is exhausted or the file's gone missing, not just get a
 /// hollow "ok" that only proves the HTTP server itself is up.
 async fn health(State(state): State<AppState>) -> Result<Json<serde_json::Value>, error::AppError> {
-    sqlx::query("SELECT 1")
-        .execute(&state.db)
+    sqlx::query_scalar!("SELECT 1")
+        .fetch_one(&state.db)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "health check: database unavailable");

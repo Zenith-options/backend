@@ -22,6 +22,18 @@ pub struct HistoryStats {
     pub total_realized_pnl: f64,
 }
 
+/// Row shape returned by the stats query. `win_count`/`loss_count` are
+/// `COALESCE(..., 0)` so they are never NULL; `total_realized_pnl` is a bare
+/// `SUM`, which is NULL for an empty history, hence `Option`. The `!`/`_`
+/// column overrides tell the macro how to decode the aggregate expressions,
+/// whose types SQLite's planner cannot always prove.
+struct HistoryStatsRow {
+    trade_count: i64,
+    win_count: i64,
+    loss_count: i64,
+    total_realized_pnl: Option<f64>,
+}
+
 #[derive(Serialize)]
 pub struct HistoryResponse {
     pub trades: Vec<Position>,
@@ -52,40 +64,32 @@ pub async fn get_history(
         .clamp(1, MAX_LIST_LIMIT);
     let offset = q.offset.unwrap_or(0).max(0);
 
-    let trades: Vec<Position> = sqlx::query_as(
-        "SELECT * FROM positions
-            WHERE wallet_address = ? AND status IN ('closed', 'rolled')
-         ORDER BY closed_at DESC
-         LIMIT ? OFFSET ?",
+    let trades: Vec<Position> = sqlx::query_as!(
+        Position,
+        "SELECT id AS \"id!\", wallet_address, underlying, strike, expiry_days, option_type, position_type, contracts, entry_premium, entry_spot, collateral, status, close_premium, close_spot, realized_pnl, opened_at, closed_at, strategy_id FROM positions WHERE wallet_address = ? AND status IN ('closed', 'rolled') ORDER BY closed_at DESC LIMIT ? OFFSET ?",
+        &wallet_address,
+        limit,
+        offset
     )
-    .bind(&wallet_address)
-    .bind(limit)
-    .bind(offset)
     .fetch_all(&state.db)
     .await
     .map_err(|e| db_error("load trade history", e))?;
 
-    let (trade_count, win_count, loss_count, total_realized_pnl): (i64, i64, i64, Option<f64>) =
-        sqlx::query_as(
-            "SELECT
-                COUNT(*),
-                COALESCE(SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN realized_pnl < 0 THEN 1 ELSE 0 END), 0),
-                SUM(realized_pnl)
-             FROM positions
-             WHERE wallet_address = ? AND status IN ('closed', 'rolled')",
-        )
-        .bind(&wallet_address)
-        .fetch_one(&state.db)
-        .await
-        .map_err(|e| db_error("compute trade history stats", e))?;
+    let row = sqlx::query_as!(
+        HistoryStatsRow,
+        "SELECT COUNT(*) AS trade_count, COALESCE(SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END), 0) AS \"win_count!: i64\", COALESCE(SUM(CASE WHEN realized_pnl < 0 THEN 1 ELSE 0 END), 0) AS \"loss_count!: i64\", SUM(realized_pnl) AS \"total_realized_pnl: _\" FROM positions WHERE wallet_address = ? AND status IN ('closed', 'rolled')",
+        &wallet_address
+    )
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| db_error("compute trade history stats", e))?;
 
-    let has_more = offset + (trades.len() as i64) < trade_count;
+    let has_more = offset + (trades.len() as i64) < row.trade_count;
     let stats = HistoryStats {
-        trade_count,
-        win_count,
-        loss_count,
-        total_realized_pnl: total_realized_pnl.unwrap_or(0.0),
+        trade_count: row.trade_count,
+        win_count: row.win_count,
+        loss_count: row.loss_count,
+        total_realized_pnl: row.total_realized_pnl.unwrap_or(0.0),
     };
 
     Ok(Json(HistoryResponse {

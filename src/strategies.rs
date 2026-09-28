@@ -123,12 +123,11 @@ pub async fn list_strategies(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
 ) -> Result<Json<Vec<StrategySummary>>, AppError> {
-    let positions: Vec<Position> = sqlx::query_as(
-        "SELECT * FROM positions
-            WHERE wallet_address = ? AND strategy_id IS NOT NULL
-         ORDER BY opened_at ASC",
+    let positions: Vec<Position> = sqlx::query_as!(
+        Position,
+        "SELECT id AS \"id!\", wallet_address, underlying, strike, expiry_days, option_type, position_type, contracts, entry_premium, entry_spot, collateral, status, close_premium, close_spot, realized_pnl, opened_at, closed_at, strategy_id FROM positions WHERE wallet_address = ? AND strategy_id IS NOT NULL ORDER BY opened_at ASC",
+        &wallet_address
     )
-    .bind(&wallet_address)
     .fetch_all(&state.db)
     .await
     .map_err(|e| db_error("list strategies", e))?;
@@ -169,13 +168,12 @@ async fn load_strategy_legs(
     wallet_address: &str,
     strategy_id: &str,
 ) -> Result<Vec<Position>, AppError> {
-    let legs: Vec<Position> = sqlx::query_as(
-        "SELECT * FROM positions
-            WHERE wallet_address = ? AND strategy_id = ?
-         ORDER BY opened_at ASC",
+    let legs: Vec<Position> = sqlx::query_as!(
+        Position,
+        "SELECT id AS \"id!\", wallet_address, underlying, strike, expiry_days, option_type, position_type, contracts, entry_premium, entry_spot, collateral, status, close_premium, close_spot, realized_pnl, opened_at, closed_at, strategy_id FROM positions WHERE wallet_address = ? AND strategy_id = ? ORDER BY opened_at ASC",
+        wallet_address,
+        strategy_id
     )
-    .bind(wallet_address)
-    .bind(strategy_id)
     .fetch_all(&state.db)
     .await
     .map_err(|e| db_error("load strategy legs", e))?;
@@ -216,12 +214,11 @@ pub async fn close_strategy(
     AuthUser(wallet_address): AuthUser,
     Path(strategy_id): Path<String>,
 ) -> Result<Json<Vec<Position>>, AppError> {
-    let open_leg_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT id FROM positions
-            WHERE wallet_address = ? AND strategy_id = ? AND status = 'open'",
+    let open_leg_ids: Vec<String> = sqlx::query_scalar!(
+        "SELECT id AS \"id!\" FROM positions WHERE wallet_address = ? AND strategy_id = ? AND status = 'open'",
+        &wallet_address,
+        &strategy_id
     )
-    .bind(&wallet_address)
-    .bind(&strategy_id)
     .fetch_all(&state.db)
     .await
     .map_err(|e| db_error("find open strategy legs", e))?;

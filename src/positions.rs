@@ -16,19 +16,24 @@ pub async fn get_account(
 ) -> Result<Json<Account>, AppError> {
     // Verify/login already creates this row, but stay defensive in case a
     // session outlives some future account-deletion path.
-    sqlx::query(
-        "INSERT INTO accounts (wallet_address) VALUES (?) ON CONFLICT(wallet_address) DO NOTHING",
+    sqlx::query!(
+        "INSERT INTO accounts (wallet_address) VALUES (?) ON CONFLICT(wallet_address) DO NOTHING"
     )
     .bind(&wallet_address)
     .execute(&state.db)
     .await
     .map_err(|e| db_error("create or confirm account", e))?;
 
-    let account: Account = sqlx::query_as("SELECT * FROM accounts WHERE wallet_address = ?")
-        .bind(&wallet_address)
-        .fetch_one(&state.db)
-        .await
-        .map_err(|e| db_error("load account", e))?;
+    // `wallet_address!` overrides SQLite's quirk of reporting TEXT PRIMARY KEY
+    // columns as nullable; the column is in fact the primary key and never NULL.
+    let account: Account = sqlx::query_as!(
+        Account,
+        "SELECT wallet_address AS \"wallet_address!\", balance, collateral_locked, created_at FROM accounts WHERE wallet_address = ?",
+        &wallet_address
+    )
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| db_error("load account", e))?;
 
     Ok(Json(account))
 }
@@ -67,36 +72,31 @@ pub async fn list_positions(
 
     // `? IS NULL OR column = ?` lets one query handle all four
     // status/strategy_id filter combinations without branching SQL.
-    let positions: Vec<Position> = sqlx::query_as(
-        "SELECT * FROM positions
-            WHERE wallet_address = ?
-              AND (? IS NULL OR status = ?)
-              AND (? IS NULL OR strategy_id = ?)
-         ORDER BY opened_at DESC
-         LIMIT ? OFFSET ?",
+    // The column list is explicit (not `SELECT *`) and `id!` overrides
+    // SQLite's quirk of reporting TEXT PRIMARY KEY columns as nullable.
+    let positions: Vec<Position> = sqlx::query_as!(
+        Position,
+        "SELECT id AS \"id!\", wallet_address, underlying, strike, expiry_days, option_type, position_type, contracts, entry_premium, entry_spot, collateral, status, close_premium, close_spot, realized_pnl, opened_at, closed_at, strategy_id FROM positions WHERE wallet_address = ? AND (? IS NULL OR status = ?) AND (? IS NULL OR strategy_id = ?) ORDER BY opened_at DESC LIMIT ? OFFSET ?",
+        &wallet_address,
+        &q.status,
+        &q.status,
+        &q.strategy_id,
+        &q.strategy_id,
+        limit,
+        offset
     )
-    .bind(&wallet_address)
-    .bind(&q.status)
-    .bind(&q.status)
-    .bind(&q.strategy_id)
-    .bind(&q.strategy_id)
-    .bind(limit)
-    .bind(offset)
     .fetch_all(&state.db)
     .await
     .map_err(|e| db_error("list positions", e))?;
 
-    let total: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM positions
-            WHERE wallet_address = ?
-              AND (? IS NULL OR status = ?)
-              AND (? IS NULL OR strategy_id = ?)",
+    let total: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM positions WHERE wallet_address = ? AND (? IS NULL OR status = ?) AND (? IS NULL OR strategy_id = ?)",
+        &wallet_address,
+        &q.status,
+        &q.status,
+        &q.strategy_id,
+        &q.strategy_id
     )
-    .bind(&wallet_address)
-    .bind(&q.status)
-    .bind(&q.status)
-    .bind(&q.strategy_id)
-    .bind(&q.strategy_id)
     .fetch_one(&state.db)
     .await
     .map_err(|e| db_error("count positions", e))?;
@@ -191,11 +191,14 @@ pub(crate) async fn open_position_in_tx(
         -entry_premium * req.contracts // premium paid
     };
 
-    let account: Account = sqlx::query_as("SELECT * FROM accounts WHERE wallet_address = ?")
-        .bind(wallet_address)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|e| db_error("load account", e))?;
+    let account: Account = sqlx::query_as!(
+        Account,
+        "SELECT wallet_address AS \"wallet_address!\", balance, collateral_locked, created_at FROM accounts WHERE wallet_address = ?",
+        wallet_address
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|e| db_error("load account", e))?;
 
     let new_balance = account.balance + cash_delta;
     let new_collateral_locked = account.collateral_locked + collateral;
@@ -209,42 +212,44 @@ pub(crate) async fn open_position_in_tx(
         ));
     }
 
-    sqlx::query("UPDATE accounts SET balance = ?, collateral_locked = ? WHERE wallet_address = ?")
-        .bind(new_balance)
-        .bind(new_collateral_locked)
-        .bind(wallet_address)
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| db_error("update account balance", e))?;
+    sqlx::query!(
+        "UPDATE accounts SET balance = ?, collateral_locked = ? WHERE wallet_address = ?",
+        new_balance,
+        new_collateral_locked,
+        wallet_address
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| db_error("update account balance", e))?;
 
     let id = uuid::Uuid::new_v4().to_string();
-    sqlx::query(
-        "INSERT INTO positions
-            (id, wallet_address, underlying, strike, expiry_days, option_type,
-             position_type, contracts, entry_premium, entry_spot, collateral, status, strategy_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)",
+    sqlx::query!(
+        "INSERT INTO positions (id, wallet_address, underlying, strike, expiry_days, option_type, position_type, contracts, entry_premium, entry_spot, collateral, status, strategy_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)",
+        &id,
+        wallet_address,
+        &req.underlying,
+        req.strike,
+        req.expiry_days,
+        &req.option_type,
+        &req.position_type,
+        req.contracts,
+        entry_premium,
+        spot,
+        collateral,
+        strategy_id
     )
-    .bind(&id)
-    .bind(wallet_address)
-    .bind(&req.underlying)
-    .bind(req.strike)
-    .bind(req.expiry_days)
-    .bind(&req.option_type)
-    .bind(&req.position_type)
-    .bind(req.contracts)
-    .bind(entry_premium)
-    .bind(spot)
-    .bind(collateral)
-    .bind(strategy_id)
     .execute(&mut **tx)
     .await
     .map_err(|e| db_error("insert position", e))?;
 
-    let position: Position = sqlx::query_as("SELECT * FROM positions WHERE id = ?")
-        .bind(&id)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|e| db_error("load the position just opened", e))?;
+    let position: Position = sqlx::query_as!(
+        Position,
+        "SELECT id AS \"id!\", wallet_address, underlying, strike, expiry_days, option_type, position_type, contracts, entry_premium, entry_spot, collateral, status, close_premium, close_spot, realized_pnl, opened_at, closed_at, strategy_id FROM positions WHERE id = ?",
+        &id
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|e| db_error("load the position just opened", e))?;
 
     Ok(position)
 }
@@ -281,11 +286,12 @@ pub(crate) async fn close_position_in_tx(
     wallet_address: &str,
     position_id: &str,
 ) -> Result<Position, AppError> {
-    let position: Position = sqlx::query_as(
-        "SELECT * FROM positions WHERE id = ? AND wallet_address = ? AND status = 'open'",
+    let position: Position = sqlx::query_as!(
+        Position,
+        "SELECT id AS \"id!\", wallet_address, underlying, strike, expiry_days, option_type, position_type, contracts, entry_premium, entry_spot, collateral, status, close_premium, close_spot, realized_pnl, opened_at, closed_at, strategy_id FROM positions WHERE id = ? AND wallet_address = ? AND status = 'open'",
+        position_id,
+        wallet_address
     )
-    .bind(position_id)
-    .bind(wallet_address)
     .fetch_optional(&mut **tx)
     .await
     .map_err(|e| db_error("look up position", e))?
@@ -335,42 +341,47 @@ pub(crate) async fn close_position_in_tx(
         close_premium * position.contracts // sell to close
     };
 
-    let account: Account = sqlx::query_as("SELECT * FROM accounts WHERE wallet_address = ?")
-        .bind(wallet_address)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|e| db_error("load account", e))?;
+    let account: Account = sqlx::query_as!(
+        Account,
+        "SELECT wallet_address AS \"wallet_address!\", balance, collateral_locked, created_at FROM accounts WHERE wallet_address = ?",
+        wallet_address
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|e| db_error("load account", e))?;
 
     let new_balance = account.balance + cash_delta;
     let new_collateral_locked = account.collateral_locked - position.collateral;
 
-    sqlx::query("UPDATE accounts SET balance = ?, collateral_locked = ? WHERE wallet_address = ?")
-        .bind(new_balance)
-        .bind(new_collateral_locked)
-        .bind(wallet_address)
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| db_error("update account balance", e))?;
-
-    sqlx::query(
-        "UPDATE positions
-            SET status = 'closed', close_premium = ?, close_spot = ?, realized_pnl = ?,
-                closed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-         WHERE id = ?",
+    sqlx::query!(
+        "UPDATE accounts SET balance = ?, collateral_locked = ? WHERE wallet_address = ?",
+        new_balance,
+        new_collateral_locked,
+        wallet_address
     )
-    .bind(close_premium)
-    .bind(spot)
-    .bind(realized_pnl)
-    .bind(position_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| db_error("update account balance", e))?;
+
+    sqlx::query!(
+        "UPDATE positions SET status = 'closed', close_premium = ?, close_spot = ?, realized_pnl = ?, closed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+        close_premium,
+        spot,
+        realized_pnl,
+        position_id
+    )
     .execute(&mut **tx)
     .await
     .map_err(|e| db_error("mark position closed", e))?;
 
-    let closed: Position = sqlx::query_as("SELECT * FROM positions WHERE id = ?")
-        .bind(position_id)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|e| db_error("load the position just closed", e))?;
+    let closed: Position = sqlx::query_as!(
+        Position,
+        "SELECT id AS \"id!\", wallet_address, underlying, strike, expiry_days, option_type, position_type, contracts, entry_premium, entry_spot, collateral, status, close_premium, close_spot, realized_pnl, opened_at, closed_at, strategy_id FROM positions WHERE id = ?",
+        position_id
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|e| db_error("load the position just closed", e))?;
 
     Ok(closed)
 }
@@ -423,8 +434,7 @@ pub async fn roll_position(
     // close_position_in_tx always marks the row 'closed'; a roll is
     // specifically a close-and-reopen, so relabel it 'rolled' to keep
     // /api/v1/history's ledger distinguishable from a plain close.
-    sqlx::query("UPDATE positions SET status = 'rolled' WHERE id = ?")
-        .bind(&closed.id)
+    sqlx::query!("UPDATE positions SET status = 'rolled' WHERE id = ?", &closed.id)
         .execute(&mut *tx)
         .await
         .map_err(|e| db_error("mark position rolled", e))?;
@@ -496,12 +506,14 @@ pub async fn get_portfolio_greeks(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
 ) -> Result<Json<AggregateGreeks>, AppError> {
-    let open_positions: Vec<Position> =
-        sqlx::query_as("SELECT * FROM positions WHERE wallet_address = ? AND status = 'open'")
-            .bind(&wallet_address)
-            .fetch_all(&state.db)
-            .await
-            .map_err(|e| db_error("load open positions for greeks", e))?;
+    let open_positions: Vec<Position> = sqlx::query_as!(
+        Position,
+        "SELECT id AS \"id!\", wallet_address, underlying, strike, expiry_days, option_type, position_type, contracts, entry_premium, entry_spot, collateral, status, close_premium, close_spot, realized_pnl, opened_at, closed_at, strategy_id FROM positions WHERE wallet_address = ? AND status = 'open'",
+        &wallet_address
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| db_error("load open positions for greeks", e))?;
 
     let mut totals = AggregateGreeks::default();
     for p in &open_positions {

@@ -71,13 +71,15 @@ pub async fn post_nonce(
     let message = format!("Sign in to Zenith\nNonce: {nonce}");
     let expires_at = format_unix_secs(now_unix() + NONCE_TTL_SECS);
 
-    sqlx::query("INSERT INTO auth_nonces (nonce, wallet_address, expires_at) VALUES (?, ?, ?)")
-        .bind(&message)
-        .bind(&req.wallet_address)
-        .bind(&expires_at)
-        .execute(&state.db)
-        .await
-        .map_err(|e| db_error("store auth nonce", e))?;
+    sqlx::query!(
+        "INSERT INTO auth_nonces (nonce, wallet_address, expires_at) VALUES (?, ?, ?)",
+        &message,
+        &req.wallet_address,
+        &expires_at
+    )
+    .execute(&state.db)
+    .await
+    .map_err(|e| db_error("store auth nonce", e))?;
 
     Ok(Json(NonceResponse { nonce, message }))
 }
@@ -106,15 +108,16 @@ pub async fn post_verify(
     State(state): State<AppState>,
     AppJson(req): AppJson<VerifyRequest>,
 ) -> Result<Json<VerifyResponse>, AppError> {
-    let row: Option<(String,)> =
-        sqlx::query_as("SELECT expires_at FROM auth_nonces WHERE nonce = ? AND wallet_address = ?")
-            .bind(&req.message)
-            .bind(&req.wallet_address)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| db_error("look up auth nonce", e))?;
+    let expires_at: Option<String> = sqlx::query_scalar!(
+        "SELECT expires_at FROM auth_nonces WHERE nonce = ? AND wallet_address = ?",
+        &req.message,
+        &req.wallet_address
+    )
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| db_error("look up auth nonce", e))?;
 
-    let (expires_at,) = row.ok_or_else(|| {
+    let expires_at = expires_at.ok_or_else(|| {
         AppError::new(
             StatusCode::UNAUTHORIZED,
             "unknown or already-consumed nonce",
@@ -126,8 +129,7 @@ pub async fn post_verify(
 
     // Single-use: consume the nonce regardless of whether the signature
     // below checks out, so a leaked signature can't be replayed either.
-    sqlx::query("DELETE FROM auth_nonces WHERE nonce = ?")
-        .bind(&req.message)
+    sqlx::query!("DELETE FROM auth_nonces WHERE nonce = ?", &req.message)
         .execute(&state.db)
         .await
         .map_err(|e| db_error("consume auth nonce", e))?;
@@ -166,23 +168,25 @@ pub async fn post_verify(
             )
         })?;
 
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO accounts (wallet_address) VALUES (?) ON CONFLICT(wallet_address) DO NOTHING",
+        &req.wallet_address
     )
-    .bind(&req.wallet_address)
     .execute(&state.db)
     .await
     .map_err(|e| db_error("create or confirm account", e))?;
 
     let token = random_token_hex(32);
     let session_expires_at = format_unix_secs(now_unix() + SESSION_TTL_SECS);
-    sqlx::query("INSERT INTO sessions (token, wallet_address, expires_at) VALUES (?, ?, ?)")
-        .bind(&token)
-        .bind(&req.wallet_address)
-        .bind(&session_expires_at)
-        .execute(&state.db)
-        .await
-        .map_err(|e| db_error("create session", e))?;
+    sqlx::query!(
+        "INSERT INTO sessions (token, wallet_address, expires_at) VALUES (?, ?, ?)",
+        &token,
+        &req.wallet_address,
+        &session_expires_at
+    )
+    .execute(&state.db)
+    .await
+    .map_err(|e| db_error("create session", e))?;
 
     Ok(Json(VerifyResponse {
         token,
@@ -215,14 +219,16 @@ impl FromRequestParts<AppState> for AuthUser {
 
         let token = header.strip_prefix("Bearer ").ok_or_else(unauthorized)?;
 
-        let row: Option<(String, String)> =
-            sqlx::query_as("SELECT wallet_address, expires_at FROM sessions WHERE token = ?")
-                .bind(token)
-                .fetch_optional(&state.db)
-                .await
-                .map_err(|e| db_error("look up session", e))?;
+        let row = sqlx::query_as!(
+            "SELECT wallet_address, expires_at FROM sessions WHERE token = ?",
+            token
+        )
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| db_error("look up session", e))?;
 
-        let (wallet_address, expires_at) = row.ok_or_else(unauthorized)?;
+        let (wallet_address, expires_at) =
+            row.map(|r| (r.wallet_address, r.expires_at)).ok_or_else(unauthorized)?;
         if expires_at.as_str() < format_unix_secs(now_unix()).as_str() {
             return Err(AppError::new(StatusCode::UNAUTHORIZED, "session expired"));
         }
@@ -244,12 +250,10 @@ pub async fn get_me(auth: AuthUser) -> Json<serde_json::Value> {
 pub async fn sweep_expired(db: &sqlx::SqlitePool) -> Result<(u64, u64), sqlx::Error> {
     let now = format_unix_secs(now_unix());
 
-    let nonces = sqlx::query("DELETE FROM auth_nonces WHERE expires_at < ?")
-        .bind(&now)
+    let nonces = sqlx::query!("DELETE FROM auth_nonces WHERE expires_at < ?", &now)
         .execute(db)
         .await?;
-    let sessions = sqlx::query("DELETE FROM sessions WHERE expires_at < ?")
-        .bind(&now)
+    let sessions = sqlx::query!("DELETE FROM sessions WHERE expires_at < ?", &now)
         .execute(db)
         .await?;
 
