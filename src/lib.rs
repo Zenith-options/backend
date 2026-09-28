@@ -2,6 +2,7 @@ use axum::http::Method;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
+    middleware,
     response::Json,
     routing::{get, post},
     Router,
@@ -22,7 +23,7 @@ pub mod models;
 pub mod payoff;
 pub mod positions;
 pub mod prices;
-pub mod rate_limit_key;
+pub mod rate_limit;
 pub mod request_id;
 pub mod strategies;
 pub mod strkey;
@@ -237,6 +238,8 @@ pub struct AppState {
     /// expected and ignored — the simulator runs regardless of whether
     /// anyone's listening.
     pub spot_tx: tokio::sync::broadcast::Sender<String>,
+    pub rate_limiter: rate_limit::RateLimiter,
+    pub redis: Option<redis::Client>,
 }
 
 impl AppState {
@@ -260,6 +263,9 @@ impl AppState {
             vol_surface: Arc::new(std::sync::Mutex::new(vols)),
             db,
             spot_tx,
+            rate_limiter: rate_limit::RateLimiter::new(None)
+                .expect("in-process rate limiter does not require configuration"),
+            redis: None,
         }
     }
 }
@@ -347,6 +353,10 @@ async fn health(State(state): State<AppState>) -> Result<Json<serde_json::Value>
         "network": "stellar-testnet",
         "database": "ok"
     })))
+}
+
+async fn livez() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
 }
 
 async fn get_spot(State(state): State<AppState>) -> Json<SpotResponse> {
@@ -524,87 +534,18 @@ pub async fn init_state() -> AppState {
         std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite://zenith.db".to_string());
     let pool = db::init_pool(&database_url).await;
 
-    let state = AppState::new(pool);
+    let redis_url = std::env::var("REDIS_URL").ok();
+    let mut state = AppState::new(pool);
+    state.rate_limiter = rate_limit::RateLimiter::new(redis_url.as_deref())
+        .expect("REDIS_URL must be a valid Redis URL");
+    state.redis = redis_url
+        .map(redis::Client::open)
+        .transpose()
+        .expect("REDIS_URL must be a valid Redis URL");
     tokio::spawn(auth::cleanup_expired_loop(state.db.clone()));
     tokio::spawn(alerts::check_alerts_loop(state.clone()));
     tokio::spawn(prices::price_simulator_loop(state.clone()));
     state
-}
-
-/// Builds the full route table over a given AppState. Split out from
-/// `init_state` so tests can build a router over a throwaway in-memory
-/// database without spawning the background loops or touching .env.
-/// The only two truly public, unauthenticated write endpoints — no login
-/// required to hit them at all, so unlike everything else they need a
-/// rate limit independent of any wallet's session. SmartIpKeyExtractor
-/// gives each client its own quota (x-forwarded-for/x-real-ip/forwarded
-/// header first, falling back to the TCP peer address via ConnectInfo —
-/// wired up in main.rs's axum::serve call) instead of one shared quota
-/// that a single abusive client could exhaust for everyone. Trusting
-/// those headers assumes a reverse proxy that sets them correctly and
-/// strips any client-supplied ones sits in front of this in production;
-/// with no proxy, they simply won't be present and the peer-IP fallback
-/// takes over.
-fn auth_rate_limited_routes() -> Router<AppState> {
-    use tower_governor::{
-        governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer,
-    };
-
-    let config = Arc::new(
-        GovernorConfigBuilder::default()
-            .key_extractor(SmartIpKeyExtractor)
-            .per_second(2)
-            .burst_size(10)
-            .finish()
-            .expect("rate limiter config"),
-    );
-
-    Router::new()
-        .route("/api/v1/auth/nonce", post(auth::post_nonce))
-        .route("/api/v1/auth/verify", post(auth::post_verify))
-        .layer(GovernorLayer { config })
-}
-
-/// Every write endpoint that mutates trading/account state, behind a more
-/// generous quota than the auth endpoints (these require a valid session,
-/// so abuse here is bounded by needing wallets in the first place — but a
-/// single compromised or careless client still shouldn't be able to
-/// hammer the DB with unlimited opens/closes/rolls). Keyed per-wallet
-/// (via BearerOrIpKeyExtractor) rather than per-IP like the auth routes:
-/// every route here already requires a session token, and keying on IP
-/// alone would mean wallets sharing a NAT/VPN/corporate network split one
-/// quota instead of each getting their own.
-fn mutation_rate_limited_routes() -> Router<AppState> {
-    use crate::rate_limit_key::BearerOrIpKeyExtractor;
-    use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
-
-    let config = Arc::new(
-        GovernorConfigBuilder::default()
-            .key_extractor(BearerOrIpKeyExtractor)
-            .per_second(5)
-            .burst_size(20)
-            .finish()
-            .expect("rate limiter config"),
-    );
-
-    Router::new()
-        .route("/api/v1/positions/open", post(positions::open_position))
-        .route(
-            "/api/v1/positions/:id/close",
-            post(positions::close_position),
-        )
-        .route("/api/v1/positions/:id/roll", post(positions::roll_position))
-        .route("/api/v1/watchlist", post(watchlist::add_watchlist))
-        .route("/api/v1/alerts", post(alerts::create_alert))
-        .route(
-            "/api/v1/strategies/execute",
-            post(strategies::execute_strategy),
-        )
-        .route(
-            "/api/v1/strategies/:id/close",
-            post(strategies::close_strategy),
-        )
-        .layer(GovernorLayer { config })
 }
 
 fn request_id_header() -> axum::http::HeaderName {
@@ -619,30 +560,48 @@ pub fn build_router(state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(health))
+        .route("/livez", get(livez))
+        .route("/readyz", get(health))
         .route("/api/v1/spot", get(get_spot))
         .route("/api/v1/price", get(price_option))
         .route("/api/v1/iv", get(get_implied_vol))
         .route("/api/v1/chain", get(get_chain))
         .route("/api/v1/expiries/:underlying", get(get_expiry_calendar))
         .route("/api/v1/stats", get(get_protocol_stats))
-        .merge(auth_rate_limited_routes())
-        .merge(mutation_rate_limited_routes())
+        .route("/api/v1/auth/nonce", post(auth::post_nonce))
+        .route("/api/v1/auth/verify", post(auth::post_verify))
         .route("/api/v1/auth/me", get(auth::get_me))
         .route("/api/v1/account", get(positions::get_account))
         .route("/api/v1/positions", get(positions::list_positions))
+        .route("/api/v1/positions/open", post(positions::open_position))
+        .route(
+            "/api/v1/positions/:id/close",
+            post(positions::close_position),
+        )
+        .route("/api/v1/positions/:id/roll", post(positions::roll_position))
         .route("/api/v1/history", get(history::get_history))
         .route("/api/v1/watchlist", get(watchlist::get_watchlist))
+        .route("/api/v1/watchlist", post(watchlist::add_watchlist))
         .route(
             "/api/v1/watchlist/:underlying",
             axum::routing::delete(watchlist::remove_watchlist),
         )
         .route("/api/v1/alerts", get(alerts::get_alerts))
+        .route("/api/v1/alerts", post(alerts::create_alert))
         .route(
             "/api/v1/alerts/:id",
             axum::routing::delete(alerts::delete_alert),
         )
         .route("/api/v1/strategies", get(strategies::list_strategies))
+        .route(
+            "/api/v1/strategies/execute",
+            post(strategies::execute_strategy),
+        )
         .route("/api/v1/strategies/:id", get(strategies::get_strategy))
+        .route(
+            "/api/v1/strategies/:id/close",
+            post(strategies::close_strategy),
+        )
         .route("/api/v1/ws/spot", get(prices::ws_spot))
         .route("/api/v1/portfolio/payoff", post(payoff::post_payoff))
         .route(
@@ -656,6 +615,10 @@ pub fn build_router(state: AppState) -> Router {
             request_id::MakeRequestUuid,
         ))
         .layer(cors)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::middleware,
+        ))
         .with_state(state)
 }
 

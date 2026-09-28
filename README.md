@@ -59,9 +59,16 @@ All `/api/v1/*` endpoints marked **auth** require an
 | `POST /api/v1/auth/verify` | Verify the signed message, get a 24h bearer session token |
 | `GET /api/v1/auth/me` **auth** | Confirm the current token's wallet address |
 
-Every `POST` below (positions open/close/roll, watchlist/alerts create,
-strategies/execute) is rate-limited per-IP (5/s, burst 20) on top of
-requiring a session — see `mutation_rate_limited_routes()` in `lib.rs`.
+Requests are rate-limited with Redis-backed GCRA when `REDIS_URL` is set;
+Redis failures fall back to a per-process GCRA limiter. Anonymous IPs,
+authenticated wallets, and callers presenting `X-API-Key` receive
+separate tiers (120, 300, and 1,200 credits/minute, respectively).
+Weighted operations consume more credits: option chains cost 5, payoff
+curves cost 4, pricing/IV queries cost 2, and POST requests cost 2 by
+default. Responses include `RateLimit-Limit`, `RateLimit-Remaining`, and
+`RateLimit-Reset` headers, plus `Retry-After` on throttling. API-key
+issuance and authorization are not implemented by this service; the
+header currently identifies the rate-limit tier and principal only.
 
 ### Account & positions **auth**
 
@@ -149,21 +156,11 @@ real theta-decay model.
 - `Dockerfile` and the CI workflow are not build/run-tested against a
   real Docker daemon or GitHub Actions runner from this environment —
   reviewed for correctness, not executed end-to-end.
-- The mutation rate limiter's bearer-token fallback (for requests with
-  no token at all) keys on peer IP only, without replicating
-  SmartIpKeyExtractor's x-forwarded-for/x-real-ip/forwarded header
-  chain — acceptable since that fallback path is only reached by
-  requests that fail AuthUser's own check regardless, but it does mean
-  that one specific path isn't proxy-aware the way the auth endpoints'
-  limiter is.
 
 Previously listed here and since addressed: the three background loops
 (auth cleanup, alert checks, price simulator) now have direct unit
 tests against their extracted per-tick logic; the rate limiter moved
-off a single global quota to per-IP (`SmartIpKeyExtractor`) on the auth
-endpoints and per-wallet (`BearerOrIpKeyExtractor`) on every mutating
-one (positions, watchlist, alerts, strategies), so wallets sharing an
-IP no longer share a quota; `list_positions`/`get_history` now report
+`list_positions`/`get_history` now report
 total count and whether more pages exist (`x-total-count`/`x-has-more`
 headers on positions, a `has_more` field on history) instead of
 leaving a paging client to guess; malformed query params and JSON
