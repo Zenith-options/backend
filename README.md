@@ -119,6 +119,22 @@ Every response carries an `x-request-id` header — a fresh UUIDv4 if the
 request didn't already have one, or the caller's own value echoed back
 unchanged otherwise — for tracing a single request through logs.
 
+## Client SDKs
+
+The OpenAPI contract in `openapi/openapi.yaml` generates TypeScript and
+Rust clients under `sdk/`. Regenerate them with Docker and Node.js:
+
+```bash
+node scripts/generate-sdks.mjs 0.1.0
+```
+
+The TypeScript package also exports `signInWithWallet()` and
+`subscribeToSpot()` helpers from `sdk/typescript/src/zenith.ts`. CI
+regenerates both clients and checks that generated files are current.
+Published GitHub releases publish the TypeScript package to npm and the
+Rust crate to crates.io; configure the repository secrets `NPM_TOKEN`
+and `CARGO_REGISTRY_TOKEN` to enable publishing.
+
 ### Error responses
 
 V2 errors use `{"error":{"code":"INSUFFICIENT_BALANCE","message":"...","details":{},"request_id":"..."}}`.

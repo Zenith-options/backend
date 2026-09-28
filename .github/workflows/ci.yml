@@ -19,6 +19,13 @@ jobs:
           node-version: 22
       - run: node scripts/generate-error-catalogue.mjs
       - run: git diff --exit-code -- docs/error-catalogue.md
+      - run: node scripts/generate-sdks.mjs 0.1.0
+      - run: git diff --exit-code -- sdk && test -z "$(git ls-files --others --exclude-standard -- sdk)"
+      - run: npm install --ignore-scripts --no-package-lock --no-audit --no-fund
+        working-directory: sdk/typescript/generated
+      - run: npm run build
+        working-directory: sdk/typescript/generated
+      - run: cargo check --manifest-path sdk/rust/generated/Cargo.toml
 
   clippy:
     runs-on: ubuntu-latest
