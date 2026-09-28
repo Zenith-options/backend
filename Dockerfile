@@ -19,7 +19,7 @@ RUN touch src/main.rs src/lib.rs && cargo build --release
 
 # --- runtime stage -------------------------------------------------------
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

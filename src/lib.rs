@@ -16,7 +16,9 @@ pub mod alerts;
 pub mod auth;
 pub mod collateral;
 pub mod db;
+pub mod delivery;
 pub mod error;
+pub mod graphql_api;
 pub mod history;
 pub mod models;
 pub mod payoff;
@@ -528,6 +530,16 @@ pub async fn init_state() -> AppState {
     tokio::spawn(auth::cleanup_expired_loop(state.db.clone()));
     tokio::spawn(alerts::check_alerts_loop(state.clone()));
     tokio::spawn(prices::price_simulator_loop(state.clone()));
+    let delivery_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            if let Err(error) = delivery::process_due_deliveries(&delivery_state, 50).await {
+                tracing::warn!(error = %error.message, "notification delivery worker failed");
+            }
+        }
+    });
     state
 }
 
@@ -604,6 +616,44 @@ fn mutation_rate_limited_routes() -> Router<AppState> {
             "/api/v1/strategies/:id/close",
             post(strategies::close_strategy),
         )
+        .route(
+            "/api/v1/delivery/channels",
+            post(delivery::register_channel).get(delivery::list_channels),
+        )
+        .route(
+            "/api/v1/delivery/channels/:id/verify",
+            post(delivery::verify_channel),
+        )
+        .route(
+            "/api/v1/delivery/channels/:id",
+            axum::routing::delete(delivery::delete_channel),
+        )
+        .route(
+            "/api/v1/delivery/webhooks",
+            post(delivery::register_webhook).get(delivery::list_webhooks),
+        )
+        .route(
+            "/api/v1/delivery/webhooks/:id",
+            axum::routing::delete(delivery::delete_webhook),
+        )
+        .route("/api/v1/delivery/api-keys", post(delivery::create_api_key))
+        .route(
+            "/api/v1/delivery/api-keys/:id",
+            axum::routing::delete(delivery::delete_api_key),
+        )
+        .route(
+            "/api/v1/delivery/api/webhooks",
+            post(delivery::register_webhook_api_key),
+        )
+        .route("/api/v1/delivery/logs", get(delivery::list_delivery_logs))
+        .route(
+            "/api/v1/delivery/logs/:id/replay",
+            post(delivery::replay_delivery),
+        )
+        .route(
+            "/api/v1/delivery/api/logs/:id/replay",
+            post(delivery::replay_delivery_api_key),
+        )
         .layer(GovernorLayer { config })
 }
 
@@ -625,6 +675,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/chain", get(get_chain))
         .route("/api/v1/expiries/:underlying", get(get_expiry_calendar))
         .route("/api/v1/stats", get(get_protocol_stats))
+        .route("/api/graphql", post(graphql_api::graphql_handler))
         .merge(auth_rate_limited_routes())
         .merge(mutation_rate_limited_routes())
         .route("/api/v1/auth/me", get(auth::get_me))

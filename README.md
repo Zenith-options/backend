@@ -9,8 +9,8 @@ a live spot-price WebSocket feed.
 
 Market data (spot prices, vol surface) is in-memory and nudged by a
 background simulator — there's no real price feed or on-chain
-integration yet. Everything else (accounts, positions, watchlist,
-alerts) persists to a SQLite file via sqlx. This is a paper-trading
+integration yet. Everything else (accounts, positions, watchlist, alerts, notifications
+and webhooks) persists to a SQLite file via sqlx. This is a paper-trading
 backend for the frontend to build against, not a production trading
 system.
 
@@ -32,6 +32,12 @@ No external services required — sqlx creates and migrates the SQLite
 file on first run, and every integration test spins up its own
 throwaway temp-file database.
 
+Notification delivery requires provider credentials to be configured:
+`DELIVERY_EMAIL_API_URL`, `DELIVERY_EMAIL_API_TOKEN`, and
+`DELIVERY_EMAIL_FROM` for email; `TELEGRAM_BOT_TOKEN` and
+`DISCORD_BOT_TOKEN` for Telegram and Discord. Email uses an HTTPS provider
+API. These variables are optional when those channels are unused.
+
 ## Endpoints
 
 All `/api/v1/*` endpoints marked **auth** require an
@@ -49,6 +55,7 @@ All `/api/v1/*` endpoints marked **auth** require an
 | `GET /api/v1/expiries/:underlying` | Available expiries for an underlying |
 | `GET /api/v1/stats` | Protocol-wide stats (mocked, not derived from real trades) |
 | `GET /api/v1/ws/spot` | WebSocket: snapshot on connect, then a live tick every ~2s |
+| `POST /api/graphql` | Read-only market and authenticated portfolio GraphQL API; depth 12 and complexity 1000 limits |
 | `POST /api/v1/portfolio/payoff` | Combined P&L curve for a set of caller-supplied legs (no auth — legs carry their own premium) |
 
 ### Auth (public, rate-limited)
@@ -59,9 +66,19 @@ All `/api/v1/*` endpoints marked **auth** require an
 | `POST /api/v1/auth/verify` | Verify the signed message, get a 24h bearer session token |
 | `GET /api/v1/auth/me` **auth** | Confirm the current token's wallet address |
 
-Every `POST` below (positions open/close/roll, watchlist/alerts create,
-strategies/execute) is rate-limited per-IP (5/s, burst 20) on top of
-requiring a session — see `mutation_rate_limited_routes()` in `lib.rs`.
+Every mutation below is rate-limited (5/s, burst 20) on top of its
+session/API-key authentication — see `mutation_rate_limited_routes()` in
+`lib.rs`.
+
+### GraphQL
+
+`POST /api/graphql` accepts a standard GraphQL JSON request. Public market
+queries expose spots, option chains and volatility surfaces. The
+`portfolio` root field requires a valid `Authorization: Bearer …` session
+and exposes the session owner's account, positions, strategies and history;
+the owner cannot be selected by a query argument. Batched loaders avoid
+per-position account/strategy queries. Mutations and subscriptions are not
+enabled.
 
 ### Account & positions **auth**
 
@@ -85,12 +102,49 @@ requiring a session — see `mutation_rate_limited_routes()` in `lib.rs`.
 |---|---|
 | `GET` / `POST /api/v1/watchlist` | List / add a watched symbol |
 | `DELETE /api/v1/watchlist/:underlying` | Remove a watched symbol |
-| `GET` / `POST /api/v1/alerts` | List / create a price alert (`above`/`below` a target) |
+| `GET` / `POST /api/v1/alerts` | List / create a spot, percent-change, IV, position/strategy P&L, portfolio-delta or expiry alert |
 | `DELETE /api/v1/alerts/:id` | Remove an alert |
 
-Alerts are checked against spot every 10s by a background task; a
-triggered alert stays in the table (visible via GET) rather than being
-deleted.
+Alerts are evaluated every 10s. Conditions are `above`/`below`,
+`percent_change_above`/`percent_change_below` (requires `window_seconds`),
+`iv_above`/`iv_below` (requires `strike`, `expiry_days`, `option_type`),
+`position_pnl_above`/`position_pnl_below` (requires `position_id`),
+`strategy_pnl_above`/`strategy_pnl_below` (requires `strategy_id`),
+`portfolio_delta_above`/`portfolio_delta_below`, `portfolio_delta_outside`
+(requires `lower_bound` and `upper_bound`), and `expiry_within` (target is
+days remaining). P&L and portfolio-delta alerts derive their underlying
+from the referenced position/strategy or use a portfolio scope, so an
+`underlying` is only required for market-series alerts. `target_price` is
+omitted for `portfolio_delta_outside`. `trigger_policy` can be `once` (default), `recurring`
+(repeats after `cooldown_seconds` while true), or `auto_rearm` (re-arms
+after the condition clears and the cooldown passes). Triggered alerts stay
+visible through GET.
+
+### Notifications & webhooks **auth**
+
+| Endpoint | What it does |
+|---|---|
+| `GET` / `POST /api/v1/delivery/channels` | List channels / begin verified email, Telegram, or Discord opt-in |
+| `POST /api/v1/delivery/channels/:id/verify` | Verify the code sent to the channel |
+| `DELETE /api/v1/delivery/channels/:id` | Unlink a channel |
+| `GET` / `POST /api/v1/delivery/webhooks` | List / register event webhooks; registration returns the secret once |
+| `DELETE /api/v1/delivery/webhooks/:id` | Remove a webhook |
+| `POST /api/v1/delivery/api-keys` | Create a wallet-scoped API key (shown once) |
+| `DELETE /api/v1/delivery/api-keys/:id` | Revoke a wallet-owned API key |
+| `POST /api/v1/delivery/api/webhooks` | Register a webhook using `X-API-Key` instead of a wallet session |
+| `GET /api/v1/delivery/logs` | List recent wallet delivery attempts |
+| `POST /api/v1/delivery/logs/:id/replay` | Replay a logged wallet delivery |
+| `POST /api/v1/delivery/api/logs/:id/replay` | Replay using `X-API-Key` |
+
+Webhook event types are `alert_triggered`, `position_settled`,
+`position_liquidated`, and `order_filled`. Requests include a Unix timestamp
+and `X-Zenith-Signature: sha256=…`, an HMAC-SHA256 of
+`<timestamp>.<raw-body>`. Failed attempts retry with exponential backoff for
+up to 24 hours; delivery records can be replayed manually. The service
+rejects non-HTTPS URLs and non-public DNS targets and does not follow
+redirects. Alerts and position open/settle events enqueue notifications;
+the delivery service also accepts margin-call and liquidation events from
+trusted internal producers.
 
 Every response carries an `x-request-id` header — a fresh UUIDv4 if the
 request didn't already have one, or the caller's own value echoed back

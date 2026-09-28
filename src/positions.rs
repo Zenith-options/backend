@@ -263,6 +263,7 @@ pub async fn open_position(
     tx.commit()
         .await
         .map_err(|e| db_error("commit open-position transaction", e))?;
+    notify_filled(&state, &position).await;
     Ok(Json(position))
 }
 
@@ -389,7 +390,39 @@ pub async fn close_position(
     tx.commit()
         .await
         .map_err(|e| db_error("commit close-position transaction", e))?;
+    notify_settled(&state, &closed).await;
     Ok(Json(closed))
+}
+
+pub(crate) async fn notify_settled(state: &AppState, position: &Position) {
+    let payload = serde_json::json!({
+        "position_id": position.id,
+        "underlying": position.underlying,
+        "status": position.status,
+        "realized_pnl": position.realized_pnl
+    });
+    if let Err(error) =
+        crate::delivery::emit_event(state, &position.wallet_address, "position_settled", payload)
+            .await
+    {
+        tracing::warn!(error = %error.message, position_id = %position.id, "queue settlement notification failed");
+    }
+}
+
+pub(crate) async fn notify_filled(state: &AppState, position: &Position) {
+    let payload = serde_json::json!({
+        "position_id": position.id,
+        "underlying": position.underlying,
+        "strike": position.strike,
+        "option_type": position.option_type,
+        "position_type": position.position_type,
+        "contracts": position.contracts
+    });
+    if let Err(error) =
+        crate::delivery::emit_event(state, &position.wallet_address, "order_filled", payload).await
+    {
+        tracing::warn!(error = %error.message, position_id = %position.id, "queue order-fill notification failed");
+    }
 }
 
 #[derive(Deserialize)]
@@ -452,6 +485,8 @@ pub async fn roll_position(
     tx.commit()
         .await
         .map_err(|e| db_error("commit roll transaction", e))?;
+    notify_settled(&state, &closed).await;
+    notify_filled(&state, &opened).await;
     Ok(Json(RollResult { closed, opened }))
 }
 
