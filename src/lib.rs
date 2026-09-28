@@ -17,6 +17,7 @@ pub mod auth;
 pub mod collateral;
 pub mod db;
 pub mod error;
+pub mod features;
 pub mod history;
 pub mod models;
 pub mod payoff;
@@ -231,6 +232,7 @@ pub struct AppState {
     pub spot_prices: Arc<std::sync::Mutex<std::collections::HashMap<String, f64>>>,
     pub vol_surface: Arc<std::sync::Mutex<std::collections::HashMap<String, f64>>>,
     pub db: sqlx::SqlitePool,
+    pub feature_flags: features::FeatureFlagCache,
     /// Broadcasts a JSON-encoded SpotResponse every time the price
     /// simulator nudges spot_prices, for the /api/v1/ws/spot handler to
     /// forward to connected clients. `send` errors (no receivers) are
@@ -258,6 +260,9 @@ impl AppState {
         Self {
             spot_prices: Arc::new(std::sync::Mutex::new(prices)),
             vol_surface: Arc::new(std::sync::Mutex::new(vols)),
+            feature_flags: features::FeatureFlagCache::new(
+                std::env::var("ZENITH_ENV").unwrap_or_else(|_| "development".to_string()),
+            ),
             db,
             spot_tx,
         }
@@ -525,6 +530,12 @@ pub async fn init_state() -> AppState {
     let pool = db::init_pool(&database_url).await;
 
     let state = AppState::new(pool);
+    state
+        .feature_flags
+        .refresh(&state.db)
+        .await
+        .expect("failed to load feature flags");
+    tokio::spawn(state.feature_flags.clone().refresh_loop(state.db.clone()));
     tokio::spawn(auth::cleanup_expired_loop(state.db.clone()));
     tokio::spawn(alerts::check_alerts_loop(state.clone()));
     tokio::spawn(prices::price_simulator_loop(state.clone()));
@@ -625,6 +636,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/chain", get(get_chain))
         .route("/api/v1/expiries/:underlying", get(get_expiry_calendar))
         .route("/api/v1/stats", get(get_protocol_stats))
+        .route("/api/v1/features", get(features::get_features))
         .merge(auth_rate_limited_routes())
         .merge(mutation_rate_limited_routes())
         .route("/api/v1/auth/me", get(auth::get_me))

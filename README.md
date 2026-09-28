@@ -48,6 +48,7 @@ All `/api/v1/*` endpoints marked **auth** require an
 | `GET /api/v1/chain` | Full option chain (calls+puts) across strikes for one expiry |
 | `GET /api/v1/expiries/:underlying` | Available expiries for an underlying |
 | `GET /api/v1/stats` | Protocol-wide stats (mocked, not derived from real trades) |
+| `GET /api/v1/features` | Environment-scoped feature flags evaluated for the optional bearer-session wallet |
 | `GET /api/v1/ws/spot` | WebSocket: snapshot on connect, then a live tick every ~2s |
 | `POST /api/v1/portfolio/payoff` | Combined P&L curve for a set of caller-supplied legs (no auth — legs carry their own premium) |
 
@@ -124,6 +125,13 @@ tests/
 `zenith_backend` library crate, which is what lets `tests/*_test.rs`
 exercise the real router without a bin-only crate's usual restriction
 (a `tests/` directory can only see a *library* crate's public items).
+
+Feature flags are stored in SQLite and refreshed into each API process's
+in-memory cache every five seconds. Set `ZENITH_ENV` to select the
+environment (defaults to `development`); flags and their wallet allowlists
+are isolated by that value. Boolean enablement is combined with a stable
+wallet-based percentage rollout, and unknown flags are disabled. An
+unauthenticated client is evaluated as the shared `anonymous` subject.
 
 ### A note on the pricing model
 
