@@ -263,6 +263,10 @@ pub async fn open_position(
     tx.commit()
         .await
         .map_err(|e| db_error("commit open-position transaction", e))?;
+    state.metrics.record_position_opened(
+        position.entry_premium * position.contracts,
+        position.collateral,
+    );
     Ok(Json(position))
 }
 
@@ -389,6 +393,10 @@ pub async fn close_position(
     tx.commit()
         .await
         .map_err(|e| db_error("commit close-position transaction", e))?;
+    state.metrics.record_position_closed(
+        closed.close_premium.unwrap_or_default() * closed.contracts,
+        closed.collateral,
+    );
     Ok(Json(closed))
 }
 
@@ -452,6 +460,13 @@ pub async fn roll_position(
     tx.commit()
         .await
         .map_err(|e| db_error("commit roll transaction", e))?;
+    state.metrics.record_position_closed(
+        closed.close_premium.unwrap_or_default() * closed.contracts,
+        closed.collateral,
+    );
+    state
+        .metrics
+        .record_position_opened(opened.entry_premium * opened.contracts, opened.collateral);
     Ok(Json(RollResult { closed, opened }))
 }
 

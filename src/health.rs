@@ -61,6 +61,22 @@ impl OperationalState {
         let status = loops.entry(name.to_owned()).or_default();
         status.last_error = Some(error.into());
     }
+
+    pub fn background_loop_health(&self) -> Vec<(&'static str, bool)> {
+        let loops = self.background_loops.lock().unwrap();
+        ["auth_cleanup", "alert_checks", "price_simulator"]
+            .into_iter()
+            .map(|name| {
+                let healthy = loops.get(name).is_some_and(|status| {
+                    status.last_error.is_none()
+                        && status.last_success.is_some_and(|last_success| {
+                            last_success.elapsed() <= Duration::from_secs(600)
+                        })
+                });
+                (name, healthy)
+            })
+            .collect()
+    }
 }
 
 impl Default for OperationalState {

@@ -17,8 +17,9 @@ pub mod auth;
 pub mod collateral;
 pub mod db;
 pub mod error;
-pub mod history;
 pub mod health;
+pub mod history;
+pub mod metrics;
 pub mod models;
 pub mod payoff;
 pub mod positions;
@@ -233,6 +234,7 @@ pub struct AppState {
     pub vol_surface: Arc<std::sync::Mutex<std::collections::HashMap<String, f64>>>,
     pub db: sqlx::SqlitePool,
     pub operations: health::OperationalState,
+    pub metrics: Arc<metrics::Metrics>,
     /// Broadcasts a JSON-encoded SpotResponse every time the price
     /// simulator nudges spot_prices, for the /api/v1/ws/spot handler to
     /// forward to connected clients. `send` errors (no receivers) are
@@ -262,6 +264,7 @@ impl AppState {
             vol_surface: Arc::new(std::sync::Mutex::new(vols)),
             db,
             operations: health::OperationalState::new(),
+            metrics: metrics::global(),
             spot_tx,
         }
     }
@@ -488,11 +491,16 @@ async fn get_protocol_stats(State(state): State<AppState>) -> Json<serde_json::V
 /// binary installing a global subscriber per-test would panic on the
 /// second one).
 pub fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "zenith_backend=info,tower_http=debug".into()),
+    use tracing_subscriber::prelude::*;
+
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "zenith_backend=info,tower_http=debug".into());
+    tracing_subscriber::registry()
+        .with(
+            metrics::SqlxQueryMetricsLayer::new()
+                .with_filter(tracing_subscriber::filter::LevelFilter::TRACE),
         )
+        .with(tracing_subscriber::fmt::layer().with_filter(filter))
         .init();
 }
 
@@ -506,6 +514,12 @@ pub async fn init_state() -> AppState {
     let pool = db::init_pool(&database_url).await;
 
     let state = AppState::new(pool);
+    let collateral_locked: f64 =
+        sqlx::query_scalar("SELECT COALESCE(SUM(collateral_locked), 0) FROM accounts")
+            .fetch_one(&state.db)
+            .await
+            .expect("failed to load initial collateral metric");
+    state.metrics.set_collateral_locked(collateral_locked);
     tokio::spawn(auth::cleanup_expired_loop(state.clone()));
     tokio::spawn(alerts::check_alerts_loop(state.clone()));
     tokio::spawn(prices::price_simulator_loop(state.clone()));
@@ -602,6 +616,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/livez", get(health::livez))
         .route("/readyz", get(health::readyz))
         .route("/health/details", get(health::details))
+        .route("/metrics", get(metrics::handler))
         .route("/api/v1/spot", get(get_spot))
         .route("/api/v1/price", get(price_option))
         .route("/api/v1/iv", get(get_implied_vol))
@@ -634,6 +649,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .layer(PropagateRequestIdLayer::new(request_id_header()))
         .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn(metrics::request_metrics))
         .layer(SetRequestIdLayer::new(
             request_id_header(),
             request_id::MakeRequestUuid,

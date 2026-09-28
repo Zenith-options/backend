@@ -134,6 +134,7 @@ pub async fn check_once(state: &AppState) -> u64 {
                     fired = r.rows_affected(),
                     "alerts triggered"
                 );
+                state.metrics.record_alert_triggers(r.rows_affected());
                 total_fired += r.rows_affected();
             }
             Ok(_) => {}

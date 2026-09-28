@@ -52,6 +52,12 @@ pub async fn execute_strategy(
     tx.commit()
         .await
         .map_err(|e| db_error("commit strategy transaction", e))?;
+    for position in &opened {
+        state.metrics.record_position_opened(
+            position.entry_premium * position.contracts,
+            position.collateral,
+        );
+    }
     Ok(Json(opened))
 }
 
@@ -247,6 +253,12 @@ pub async fn close_strategy(
     tx.commit()
         .await
         .map_err(|e| db_error("commit close-strategy transaction", e))?;
+    for position in &closed {
+        state.metrics.record_position_closed(
+            position.close_premium.unwrap_or_default() * position.contracts,
+            position.collateral,
+        );
+    }
     Ok(Json(closed))
 }
 

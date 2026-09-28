@@ -34,7 +34,10 @@ async fn health_details_requires_authentication_and_reports_dependency_latency()
     assert_eq!(body["status"], "ok");
     assert_eq!(body["dependencies"]["database"]["status"], "ok");
     assert!(body["dependencies"]["database"]["latency_ms"].is_number());
-    assert_eq!(body["dependencies"]["database"]["last_error"], serde_json::Value::Null);
+    assert_eq!(
+        body["dependencies"]["database"]["last_error"],
+        serde_json::Value::Null
+    );
     assert_eq!(body["dependencies"]["migrations"]["status"], "ok");
     assert_eq!(body["dependencies"]["market_data"]["status"], "ok");
     assert_eq!(body["dependencies"]["draining"]["status"], "ok");

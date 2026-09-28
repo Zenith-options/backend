@@ -40,7 +40,9 @@ pub async fn price_simulator_loop(state: AppState) {
     loop {
         interval.tick().await;
         tick_once(&state);
-        state.operations.background_loop_succeeded("price_simulator");
+        state
+            .operations
+            .background_loop_succeeded("price_simulator");
     }
 }
 
@@ -49,6 +51,7 @@ pub async fn ws_spot(ws: WebSocketUpgrade, State(state): State<AppState>) -> Res
 }
 
 async fn handle_spot_socket(mut socket: WebSocket, state: AppState) {
+    let _connection = state.metrics.websocket_connected();
     // Send an immediate snapshot so the client has something to render
     // before the first simulator tick (up to 2s away) arrives.
     let snapshot = {
