@@ -5,6 +5,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use serde::de::DeserializeOwned;
 use serde_json::json;
+use validator::Validate;
 
 /// A JSON-bodied error instead of the empty-body `StatusCode` rejections
 /// every handler was returning — a client currently has to infer "why"
@@ -16,6 +17,7 @@ use serde_json::json;
 pub struct AppError {
     pub status: StatusCode,
     pub message: String,
+    pub details: Option<serde_json::Value>,
 }
 
 impl AppError {
@@ -23,14 +25,24 @@ impl AppError {
         Self {
             status,
             message: message.into(),
+            details: None,
         }
+    }
+
+    pub fn with_details(mut self, details: serde_json::Value) -> Self {
+        self.details = Some(details);
+        self
     }
 }
 
 impl From<StatusCode> for AppError {
     fn from(status: StatusCode) -> Self {
         let message = status.canonical_reason().unwrap_or("error").to_string();
-        Self { status, message }
+        Self {
+            status,
+            message,
+            details: None,
+        }
     }
 }
 
@@ -49,7 +61,11 @@ pub fn db_error(context: &str, e: sqlx::Error) -> AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        (self.status, Json(json!({ "error": self.message }))).into_response()
+        let mut body = json!({ "error": self.message });
+        if let Some(details) = self.details {
+            body["details"] = details;
+        }
+        (self.status, Json(body)).into_response()
     }
 }
 
@@ -65,6 +81,23 @@ impl From<QueryRejection> for AppError {
 /// broke the JSON-error-body contract every other handler upholds. Every
 /// `Query<T>` extractor in the app should use this instead.
 pub struct AppQuery<T>(pub T);
+
+pub struct ValidatedQuery<T>(pub T);
+
+#[axum::async_trait]
+impl<S, T> FromRequestParts<S> for ValidatedQuery<T>
+where
+    T: DeserializeOwned + Validate + Send,
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let Query(value) = Query::<T>::from_request_parts(parts, state).await?;
+        validate_request(&value)?;
+        Ok(ValidatedQuery(value))
+    }
+}
 
 #[axum::async_trait]
 impl<S, T> FromRequestParts<S> for AppQuery<T>
@@ -92,6 +125,47 @@ impl From<JsonRejection> for AppError {
 /// the target type: ..."). Every `Json<T>` request-body extractor in the
 /// app should use this instead.
 pub struct AppJson<T>(pub T);
+
+pub struct ValidatedJson<T>(pub T);
+
+#[axum::async_trait]
+impl<S, T> FromRequest<S> for ValidatedJson<T>
+where
+    T: DeserializeOwned + Validate + Send,
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let Json(value) = Json::<T>::from_request(req, state).await?;
+        validate_request(&value)?;
+        Ok(ValidatedJson(value))
+    }
+}
+
+fn validate_request<T: Validate>(value: &T) -> Result<(), AppError> {
+    value.validate().map_err(|errors| {
+        let fields: Vec<serde_json::Value> = errors
+            .field_errors()
+            .into_iter()
+            .map(|(field, violations)| {
+                let messages: Vec<String> = violations
+                    .iter()
+                    .map(|violation| {
+                        violation
+                            .message
+                            .as_ref()
+                            .map(ToString::to_string)
+                            .unwrap_or_else(|| format!("{} constraint failed", violation.code))
+                    })
+                    .collect();
+                json!({ "field": field, "errors": messages })
+            })
+            .collect();
+        AppError::new(StatusCode::UNPROCESSABLE_ENTITY, "request validation failed")
+            .with_details(json!({ "fields": fields }))
+    })
+}
 
 #[axum::async_trait]
 impl<S, T> FromRequest<S> for AppJson<T>

@@ -14,10 +14,12 @@ use tower_http::trace::TraceLayer;
 
 pub mod alerts;
 pub mod auth;
+pub mod batch;
 pub mod collateral;
 pub mod db;
 pub mod error;
 pub mod history;
+pub mod http_cache;
 pub mod models;
 pub mod payoff;
 pub mod positions;
@@ -28,7 +30,7 @@ pub mod strategies;
 pub mod strkey;
 pub mod watchlist;
 
-use error::AppQuery;
+use error::ValidatedQuery;
 
 // ─── Black-Scholes Pricing Engine ─────────────────────────────────────────────
 
@@ -266,21 +268,34 @@ impl AppState {
 
 // ─── Request / Response Types ─────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, validator::Validate)]
 pub struct PriceQuery {
+    #[validate(length(min = 1, max = 32))]
     pub underlying: String,
+    #[validate(range(min = 0.000001, max = 1000000000.0))]
     pub strike: f64,
+    #[validate(range(min = 0.000001, max = 3650.0))]
     pub expiry_days: f64,
+    #[validate(custom(function = "valid_option_type"))]
     pub option_type: String, // "call" | "put"
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, validator::Validate)]
 pub struct IvQuery {
+    #[validate(length(min = 1, max = 32))]
     pub underlying: String,
+    #[validate(range(min = 0.000001, max = 1000000000.0))]
     pub strike: f64,
+    #[validate(range(min = 0.000001, max = 3650.0))]
     pub expiry_days: f64,
+    #[validate(custom(function = "valid_option_type"))]
     pub option_type: String, // "call" | "put"
+    #[validate(range(min = 0.000001, max = 1000000000.0))]
     pub market_price: f64,
+}
+
+fn valid_option_type(value: &str) -> Result<(), validator::ValidationError> {
+    if value == "call" || value == "put" { Ok(()) } else { Err(validator::ValidationError::new("invalid_option_type")) }
 }
 
 #[derive(Serialize)]
@@ -298,9 +313,11 @@ pub struct OptionChainEntry {
     pub is_itm_put: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, validator::Validate)]
 pub struct ChainQuery {
+    #[validate(length(min = 1, max = 32))]
     pub underlying: String,
+    #[validate(range(min = 0.000001, max = 3650.0))]
     pub expiry_days: f64,
 }
 
@@ -357,7 +374,7 @@ async fn get_spot(State(state): State<AppState>) -> Json<SpotResponse> {
 
 async fn price_option(
     State(state): State<AppState>,
-    AppQuery(q): AppQuery<PriceQuery>,
+    ValidatedQuery(q): ValidatedQuery<PriceQuery>,
 ) -> Result<Json<BSResult>, StatusCode> {
     let prices = state.spot_prices.lock().unwrap();
     let vols = state.vol_surface.lock().unwrap();
@@ -382,7 +399,7 @@ async fn price_option(
 
 async fn get_chain(
     State(state): State<AppState>,
-    AppQuery(q): AppQuery<ChainQuery>,
+    ValidatedQuery(q): ValidatedQuery<ChainQuery>,
 ) -> Result<Json<Vec<OptionChainEntry>>, StatusCode> {
     let prices = state.spot_prices.lock().unwrap();
     let vols = state.vol_surface.lock().unwrap();
@@ -441,7 +458,7 @@ async fn get_chain(
 
 async fn get_implied_vol(
     State(state): State<AppState>,
-    AppQuery(q): AppQuery<IvQuery>,
+    ValidatedQuery(q): ValidatedQuery<IvQuery>,
 ) -> Result<Json<IvResult>, StatusCode> {
     let prices = state.spot_prices.lock().unwrap();
     let spot = *prices.get(&q.underlying).ok_or(StatusCode::NOT_FOUND)?;
@@ -562,6 +579,7 @@ fn auth_rate_limited_routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/auth/nonce", post(auth::post_nonce))
         .route("/api/v1/auth/verify", post(auth::post_verify))
+        .route("/api/v1/price/batch", post(batch::post_batch))
         .layer(GovernorLayer { config })
 }
 
@@ -615,7 +633,8 @@ pub fn build_router(state: AppState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-        .allow_headers(Any);
+        .allow_headers(Any)
+        .expose_headers([axum::http::header::ETAG]);
 
     Router::new()
         .route("/health", get(health))
@@ -643,6 +662,11 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/strategies", get(strategies::list_strategies))
         .route("/api/v1/strategies/:id", get(strategies::get_strategy))
+        .route("/api/v1/auth/keys", post(auth::create_api_key))
+        .route(
+            "/api/v1/auth/keys/:id",
+            axum::routing::delete(auth::delete_api_key),
+        )
         .route("/api/v1/ws/spot", get(prices::ws_spot))
         .route("/api/v1/portfolio/payoff", post(payoff::post_payoff))
         .route(
@@ -654,6 +678,13 @@ pub fn build_router(state: AppState) -> Router {
         .layer(SetRequestIdLayer::new(
             request_id_header(),
             request_id::MakeRequestUuid,
+        ))
+        .layer(tower_http::compression::CompressionLayer::new()
+            .compress_when(tower_http::compression::predicate::SizeAbove::new(1024)))
+        .layer(axum::middleware::from_fn(http_cache::cache_responses))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::api_key_middleware,
         ))
         .layer(cors)
         .with_state(state)

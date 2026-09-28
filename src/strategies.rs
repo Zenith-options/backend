@@ -3,17 +3,19 @@ use axum::http::StatusCode;
 use axum::response::Json;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use validator::Validate;
 
 use crate::auth::AuthUser;
-use crate::error::{db_error, AppError, AppJson};
+use crate::error::{db_error, AppError, ValidatedJson};
 use crate::models::Position;
 use crate::positions::{
     close_position_in_tx, current_bs_result, open_position_in_tx, OpenPositionRequest,
 };
 use crate::AppState;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, validator::Validate)]
 pub struct ExecuteStrategyRequest {
+    #[validate(length(min = 2, max = 500), nested)]
     pub legs: Vec<OpenPositionRequest>,
 }
 
@@ -24,7 +26,7 @@ pub struct ExecuteStrategyRequest {
 pub async fn execute_strategy(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
-    AppJson(req): AppJson<ExecuteStrategyRequest>,
+    ValidatedJson(req): ValidatedJson<ExecuteStrategyRequest>,
 ) -> Result<Json<Vec<Position>>, AppError> {
     if req.legs.len() < 2 {
         // A single "strategy" leg is just a plain open — use

@@ -3,14 +3,16 @@ use axum::response::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::AuthUser;
-use crate::error::{db_error, AppError, AppQuery};
+use crate::error::{db_error, AppError, ValidatedQuery};
 use crate::models::Position;
 use crate::positions::{DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT};
 use crate::AppState;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, validator::Validate)]
 pub struct HistoryQuery {
+    #[validate(range(min = 1, max = 200))]
     pub limit: Option<i64>,
+    #[validate(range(min = 0, max = 10000000))]
     pub offset: Option<i64>,
 }
 
@@ -44,7 +46,7 @@ pub struct HistoryResponse {
 pub async fn get_history(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
-    AppQuery(q): AppQuery<HistoryQuery>,
+    ValidatedQuery(q): ValidatedQuery<HistoryQuery>,
 ) -> Result<Json<HistoryResponse>, AppError> {
     let limit = q
         .limit

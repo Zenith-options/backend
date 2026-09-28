@@ -1,12 +1,18 @@
 use axum::extract::{FromRequestParts, State};
-use axum::http::{request::Parts, StatusCode};
-use axum::response::Json;
+use axum::http::{request::Parts, Request, StatusCode};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Json, Response};
 use data_encoding::BASE64;
 use ed25519_dalek::{Signature, VerifyingKey};
+use hmac::{Hmac, Mac};
 use rand::RngCore;
+use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
+use sqlx::FromRow;
+use std::net::IpAddr;
+use validator::Validate;
 
-use crate::error::{db_error, AppError, AppJson};
+use crate::error::{db_error, AppError, ValidatedJson};
 use crate::AppState;
 
 const NONCE_TTL_SECS: i64 = 5 * 60;
@@ -45,8 +51,9 @@ fn format_unix_secs(total_secs: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}.000Z")
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 pub struct NonceRequest {
+    #[validate(length(min = 1, max = 64))]
     pub wallet_address: String,
 }
 
@@ -58,7 +65,7 @@ pub struct NonceResponse {
 
 pub async fn post_nonce(
     State(state): State<AppState>,
-    AppJson(req): AppJson<NonceRequest>,
+    ValidatedJson(req): ValidatedJson<NonceRequest>,
 ) -> Result<Json<NonceResponse>, AppError> {
     if crate::strkey::decode_stellar_public_key(&req.wallet_address).is_err() {
         return Err(AppError::new(
@@ -89,10 +96,13 @@ fn now_unix() -> i64 {
         .as_secs() as i64
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 pub struct VerifyRequest {
+    #[validate(length(min = 1, max = 64))]
     pub wallet_address: String,
+    #[validate(length(min = 1, max = 128))]
     pub message: String,
+    #[validate(length(min = 1, max = 128))]
     pub signature: String, // base64-encoded 64-byte ed25519 signature
 }
 
@@ -104,7 +114,7 @@ pub struct VerifyResponse {
 
 pub async fn post_verify(
     State(state): State<AppState>,
-    AppJson(req): AppJson<VerifyRequest>,
+    ValidatedJson(req): ValidatedJson<VerifyRequest>,
 ) -> Result<Json<VerifyResponse>, AppError> {
     let row: Option<(String,)> =
         sqlx::query_as("SELECT expires_at FROM auth_nonces WHERE nonce = ? AND wallet_address = ?")
@@ -204,6 +214,9 @@ impl FromRequestParts<AppState> for AuthUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        if let Some(identity) = parts.extensions.get::<ApiKeyIdentity>() {
+            return Ok(AuthUser(identity.wallet_address.clone()));
+        }
         let unauthorized =
             || AppError::new(StatusCode::UNAUTHORIZED, "missing or invalid bearer token");
 
@@ -226,10 +239,251 @@ impl FromRequestParts<AppState> for AuthUser {
         if expires_at.as_str() < format_unix_secs(now_unix()).as_str() {
             return Err(AppError::new(StatusCode::UNAUTHORIZED, "session expired"));
         }
-
         Ok(AuthUser(wallet_address))
     }
 }
+
+#[derive(Clone)]
+        pub struct ApiKeyIdentity {
+            pub wallet_address: String,
+            pub scopes: Vec<String>,
+        }
+
+        #[derive(FromRow)]
+        struct ApiKeyRow {
+            wallet_address: String,
+            secret: String,
+            scopes: String,
+            ip_allowlist: Option<String>,
+            expires_at: Option<String>,
+        }
+
+        type HmacSha256 = Hmac<Sha256>;
+
+        /// Authenticates optional API-key-signed requests. Session-based wallet
+        /// authentication remains available for interactive clients; API keys are
+        /// never accepted as bearer tokens.
+        pub async fn api_key_middleware(
+            State(state): State<AppState>,
+            request: Request<axum::body::Body>,
+            next: Next,
+        ) -> Response {
+            let key_id_header = request.headers().get("x-api-key");
+            if key_id_header.is_none() {
+                if request.headers().contains_key("x-api-timestamp")
+                    || request.headers().contains_key("x-api-signature")
+                {
+                    return AppError::new(StatusCode::UNAUTHORIZED, "incomplete API request signature").into_response();
+                }
+                return next.run(request).await;
+            }
+            let Some(key_id) = key_id_header.and_then(|v| v.to_str().ok()) else {
+                return AppError::new(StatusCode::UNAUTHORIZED, "invalid API key ID").into_response();
+            };
+            let reject = |status, message: &'static str| {
+                AppError::new(status, message).into_response()
+            };
+            let now = now_unix();
+            let timestamp = match request
+                .headers()
+                .get("x-api-timestamp")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<i64>().ok())
+            {
+                Some(timestamp) if timestamp.abs_diff(now) <= 300 => timestamp,
+                _ => return reject(StatusCode::UNAUTHORIZED, "missing or expired API signature timestamp"),
+            };
+            let signature = match request.headers().get("x-api-signature").and_then(|v| v.to_str().ok()).map(str::to_owned) {
+                Some(signature) => signature,
+                None => return reject(StatusCode::UNAUTHORIZED, "missing API request signature"),
+            };
+            let row: Option<ApiKeyRow> = match sqlx::query_as(
+                "SELECT wallet_address, secret, scopes, ip_allowlist, expires_at FROM api_keys WHERE id = ?",
+            )
+            .bind(key_id)
+            .fetch_optional(&state.db)
+            .await
+            {
+                Ok(row) => row,
+                Err(error) => {
+                    tracing::error!(%error, "failed to load API key");
+                    return AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "failed to authenticate API key").into_response();
+                }
+            };
+            let Some(row) = row else {
+                return reject(StatusCode::UNAUTHORIZED, "unknown API key");
+            };
+            if row.expires_at.as_deref().is_some_and(|expiry| expiry < format_unix_secs(now_unix()).as_str()) {
+                return reject(StatusCode::UNAUTHORIZED, "API key expired");
+            }
+            if let Some(allowlist) = row.ip_allowlist.as_deref() {
+                let peer_ip = request.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                    .map(|connect| connect.0.ip());
+                let allowlist = match serde_json::from_str::<Vec<String>>(allowlist) {
+                    Ok(ips) => ips,
+                    Err(error) => {
+                        tracing::error!(%error, "stored API key IP allowlist is invalid");
+                        return AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "failed to authenticate API key").into_response();
+                    }
+                };
+                let allowed = peer_ip.is_some_and(|ip| {
+                    allowlist.iter().any(|candidate| candidate.parse::<IpAddr>() == Ok(ip))
+                });
+                if !allowed {
+                    return reject(StatusCode::FORBIDDEN, "request IP is not allowlisted");
+                }
+            }
+            let (parts, body) = request.into_parts();
+            let body = match axum::body::to_bytes(body, 2 * 1024 * 1024).await {
+                Ok(body) => body,
+                Err(_) => return reject(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large"),
+            };
+            let body_hash = data_encoding::HEXLOWER.encode(&Sha256::digest(&body));
+            let path = parts.uri.path_and_query().map(|v| v.as_str()).unwrap_or("/");
+            let canonical = format!("{}\n{}\n{}\n{}", parts.method, path, timestamp, body_hash);
+            let Ok(secret) = data_encoding::HEXLOWER.decode(row.secret.as_bytes()) else {
+                return reject(StatusCode::UNAUTHORIZED, "invalid API key");
+            };
+            let Ok(mut mac) = HmacSha256::new_from_slice(&secret) else {
+                return reject(StatusCode::UNAUTHORIZED, "invalid API key");
+            };
+            mac.update(canonical.as_bytes());
+            let Ok(signature_bytes) = data_encoding::HEXLOWER.decode(signature.as_bytes()) else {
+                return reject(StatusCode::UNAUTHORIZED, "invalid API request signature");
+            };
+            if mac.verify_slice(&signature_bytes).is_err() {
+                return reject(StatusCode::UNAUTHORIZED, "invalid API request signature");
+            }
+            let scopes: Vec<String> = match serde_json::from_str(&row.scopes) {
+                Ok(scopes) => scopes,
+                Err(error) => {
+                    tracing::error!(%error, "stored API key scopes are invalid");
+                    return AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "failed to authenticate API key").into_response();
+                }
+            };
+            let required_scope = if path.starts_with("/api/v1/alerts") {
+                "alerts"
+            } else if path.starts_with("/api/v1/auth/keys") {
+                return reject(StatusCode::FORBIDDEN, "API keys cannot manage API keys");
+            } else if path.starts_with("/api/v1/price/batch")
+                || path.starts_with("/api/v1/portfolio/payoff")
+            {
+                "read"
+            } else if parts.method == axum::http::Method::GET {
+                "read"
+            } else {
+                "trade"
+            };
+            if !scopes.iter().any(|scope| scope == required_scope) {
+                return reject(StatusCode::FORBIDDEN, "API key lacks the required scope");
+            }
+            let mut request = Request::from_parts(parts, axum::body::Body::from(body));
+            request.extensions_mut().insert(ApiKeyIdentity {
+                wallet_address: row.wallet_address,
+                scopes,
+            });
+            next.run(request).await
+        }
+
+        #[derive(Deserialize, Validate)]
+        pub struct CreateApiKeyRequest {
+            #[validate(length(min = 1, max = 64))]
+            pub label: String,
+            #[validate(length(min = 1, max = 3))]
+            #[validate(custom(function = "validate_scopes"))]
+            pub scopes: Vec<String>,
+            #[validate(custom(function = "validate_allowlist"))]
+            pub ip_allowlist: Option<Vec<String>>,
+            #[validate(custom(function = "validate_expiry"))]
+            pub expires_at: Option<String>,
+        }
+
+        fn validate_scopes(scopes: &[String]) -> Result<(), validator::ValidationError> {
+            if scopes.iter().all(|scope| ["read", "trade", "alerts"].contains(&scope.as_str()))
+                && scopes.iter().collect::<std::collections::HashSet<_>>().len() == scopes.len()
+            {
+                Ok(())
+            } else {
+                Err(validator::ValidationError::new("invalid_scope"))
+            }
+        }
+
+        fn validate_allowlist(ips: &Vec<String>) -> Result<(), validator::ValidationError> {
+            if ips.len() <= 50 && ips.iter().all(|ip| ip.parse::<IpAddr>().is_ok()) {
+                Ok(())
+            } else {
+                Err(validator::ValidationError::new("invalid_ip_allowlist"))
+            }
+        }
+
+        fn validate_expiry(value: &String) -> Result<(), validator::ValidationError> {
+            if chrono::DateTime::parse_from_rfc3339(value)
+                .is_ok_and(|date| date > chrono::Utc::now())
+            {
+                Ok(())
+            } else {
+                Err(validator::ValidationError::new("invalid_expiry"))
+            }
+        }
+
+        #[derive(Serialize)]
+        pub struct CreateApiKeyResponse {
+            pub id: String,
+            pub secret: String,
+            pub label: String,
+            pub scopes: Vec<String>,
+            pub ip_allowlist: Option<Vec<String>>,
+            pub expires_at: Option<String>,
+        }
+
+        pub async fn create_api_key(
+            State(state): State<AppState>,
+            AuthUser(wallet_address): AuthUser,
+            identity: Option<axum::extract::Extension<ApiKeyIdentity>>,
+            ValidatedJson(req): ValidatedJson<CreateApiKeyRequest>,
+        ) -> Result<(StatusCode, Json<CreateApiKeyResponse>), AppError> {
+            if identity.is_some() {
+                return Err(AppError::new(StatusCode::FORBIDDEN, "API keys cannot create API keys"));
+            }
+            let id = uuid::Uuid::new_v4().to_string();
+            let secret = random_token_hex(32);
+            sqlx::query("INSERT INTO api_keys (id, wallet_address, secret, scopes, ip_allowlist, expires_at, label) VALUES (?, ?, ?, ?, ?, ?, ?)")
+                .bind(&id)
+                .bind(&wallet_address)
+                .bind(&secret)
+                .bind(serde_json::to_string(&req.scopes).unwrap())
+                .bind(req.ip_allowlist.as_ref().map(serde_json::to_string).transpose().map_err(|_| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, "failed to encode API key allowlist"))?)
+                .bind(req.expires_at.as_ref().map(|value| {
+                    chrono::DateTime::parse_from_rfc3339(value)
+                        .expect("validated RFC3339 expiry")
+                        .with_timezone(&chrono::Utc)
+                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                }))
+                .bind(&req.label)
+                .execute(&state.db)
+                .await
+                .map_err(|e| db_error("create API key", e))?;
+            Ok((StatusCode::CREATED, Json(CreateApiKeyResponse {
+                id, secret, label: req.label, scopes: req.scopes, ip_allowlist: req.ip_allowlist, expires_at: req.expires_at,
+            })))
+        }
+
+        pub async fn delete_api_key(
+            State(state): State<AppState>,
+            AuthUser(wallet_address): AuthUser,
+            axum::extract::Path(id): axum::extract::Path<String>,
+        ) -> Result<StatusCode, AppError> {
+            let result = sqlx::query("DELETE FROM api_keys WHERE id = ? AND wallet_address = ?")
+                .bind(id)
+                .bind(wallet_address)
+                .execute(&state.db)
+                .await
+                .map_err(|e| db_error("delete API key", e))?;
+            if result.rows_affected() == 0 {
+                return Err(AppError::new(StatusCode::NOT_FOUND, "API key not found"));
+            }
+            Ok(StatusCode::NO_CONTENT)
+        }
 
 pub async fn get_me(auth: AuthUser) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "wallet_address": auth.0 }))
@@ -438,7 +692,7 @@ mod tests {
             message: message.to_string(),
             signature: "AA==".to_string(),
         };
-        let result = post_verify(State(state.clone()), AppJson(req)).await;
+        let result = post_verify(State(state.clone()), ValidatedJson(req)).await;
         let err = result.expect_err("an expired nonce must be rejected");
         assert_eq!(err.message, "nonce expired");
 

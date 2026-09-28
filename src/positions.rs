@@ -6,7 +6,7 @@ use sqlx::{Sqlite, Transaction};
 
 use crate::auth::AuthUser;
 use crate::collateral::collateral_required;
-use crate::error::{db_error, AppError, AppJson, AppQuery};
+use crate::error::{db_error, AppError, AppJson, ValidatedJson, ValidatedQuery};
 use crate::models::{Account, Position};
 use crate::{black_scholes, smile_vol, AppState, BSInputs, BSResult};
 
@@ -36,16 +36,27 @@ pub async fn get_account(
 pub const DEFAULT_LIST_LIMIT: i64 = 50;
 pub const MAX_LIST_LIMIT: i64 = 200;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize, validator::Validate)]
 pub struct ListPositionsQuery {
     /// "open" | "closed" | "rolled" — omit to return every status.
+    #[validate(custom(function = "valid_position_status"))]
     pub status: Option<String>,
     /// Restrict to the legs of one multi-leg strategy — omit for everything.
+    #[validate(length(min = 1, max = 64))]
     pub strategy_id: Option<String>,
     /// Defaults to DEFAULT_LIST_LIMIT, capped at MAX_LIST_LIMIT regardless
     /// of what the caller asks for.
     pub limit: Option<i64>,
+    #[validate(range(min = 0, max = 10000000))]
     pub offset: Option<i64>,
+}
+
+fn valid_position_status(status: &String) -> Result<(), validator::ValidationError> {
+    if ["open", "closed", "rolled"].contains(&status.as_str()) {
+        Ok(())
+    } else {
+        Err(validator::ValidationError::new("invalid_status"))
+    }
 }
 
 /// Response shape is still a bare JSON array (unchanged, since the
@@ -57,7 +68,7 @@ pub struct ListPositionsQuery {
 pub async fn list_positions(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
-    AppQuery(q): AppQuery<ListPositionsQuery>,
+    ValidatedQuery(q): ValidatedQuery<ListPositionsQuery>,
 ) -> Result<(HeaderMap, Json<Vec<Position>>), AppError> {
     let limit = q
         .limit
@@ -112,14 +123,28 @@ pub async fn list_positions(
     Ok((headers, Json(positions)))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize, validator::Validate)]
 pub struct OpenPositionRequest {
+    #[validate(length(min = 1, max = 32))]
     pub underlying: String,
+    #[validate(range(min = 0.000001, max = 1000000000.0))]
     pub strike: f64,
+    #[validate(range(min = 0.000001, max = 3650.0))]
     pub expiry_days: f64,
+    #[validate(custom(function = "valid_option_type"))]
     pub option_type: String,   // "call" | "put"
+    #[validate(custom(function = "valid_position_type"))]
     pub position_type: String, // "long" | "short"
+    #[validate(range(min = 0.000001, max = 1000000.0))]
     pub contracts: f64,
+}
+
+fn valid_option_type(value: &str) -> Result<(), validator::ValidationError> {
+    if value == "call" || value == "put" { Ok(()) } else { Err(validator::ValidationError::new("invalid_option_type")) }
+}
+
+fn valid_position_type(value: &str) -> Result<(), validator::ValidationError> {
+    if value == "long" || value == "short" { Ok(()) } else { Err(validator::ValidationError::new("invalid_position_type")) }
 }
 
 /// Prices and inserts a new position, debiting/crediting the account and
@@ -252,7 +277,7 @@ pub(crate) async fn open_position_in_tx(
 pub async fn open_position(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
-    AppJson(req): AppJson<OpenPositionRequest>,
+    ValidatedJson(req): ValidatedJson<OpenPositionRequest>,
 ) -> Result<Json<Position>, AppError> {
     let mut tx = state
         .db
