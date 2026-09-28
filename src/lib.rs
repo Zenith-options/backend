@@ -15,6 +15,7 @@ use tower_http::trace::TraceLayer;
 pub mod alerts;
 pub mod auth;
 pub mod collateral;
+pub mod config;
 pub mod db;
 pub mod error;
 pub mod history;
@@ -231,6 +232,7 @@ pub struct AppState {
     pub spot_prices: Arc<std::sync::Mutex<std::collections::HashMap<String, f64>>>,
     pub vol_surface: Arc<std::sync::Mutex<std::collections::HashMap<String, f64>>>,
     pub db: sqlx::SqlitePool,
+    pub config: std::sync::Arc<config::Config>,
     /// Broadcasts a JSON-encoded SpotResponse every time the price
     /// simulator nudges spot_prices, for the /api/v1/ws/spot handler to
     /// forward to connected clients. `send` errors (no receivers) are
@@ -241,17 +243,12 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(db: sqlx::SqlitePool) -> Self {
-        let mut prices = std::collections::HashMap::new();
-        prices.insert("XLM".into(), 0.1182);
-        prices.insert("BTC".into(), 67420.50);
-        prices.insert("ETH".into(), 3512.80);
-        prices.insert("SOL".into(), 182.45);
+        Self::new_with_config(db, config::Config::default())
+    }
 
-        let mut vols = std::collections::HashMap::new();
-        vols.insert("XLM".into(), 0.82); // 82% ann vol
-        vols.insert("BTC".into(), 0.65);
-        vols.insert("ETH".into(), 0.72);
-        vols.insert("SOL".into(), 0.91);
+    pub fn new_with_config(db: sqlx::SqlitePool, config: config::Config) -> Self {
+        let prices = config.seeded_prices.clone();
+        let vols = config.seeded_vols.clone();
 
         let (spot_tx, _) = tokio::sync::broadcast::channel(16);
 
@@ -259,6 +256,7 @@ impl AppState {
             spot_prices: Arc::new(std::sync::Mutex::new(prices)),
             vol_surface: Arc::new(std::sync::Mutex::new(vols)),
             db,
+            config: Arc::new(config),
             spot_tx,
         }
     }
@@ -520,11 +518,14 @@ pub fn init_tracing() {
 /// simulator) against it.
 pub async fn init_state() -> AppState {
     dotenvy::dotenv().ok();
-    let database_url =
-        std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite://zenith.db".to_string());
-    let pool = db::init_pool(&database_url).await;
+    let config = config::Config::load().expect("invalid application configuration");
+    init_state_with_config(config).await
+}
 
-    let state = AppState::new(pool);
+pub async fn init_state_with_config(config: config::Config) -> AppState {
+    let pool = db::init_pool(&config.database_url).await;
+
+    let state = AppState::new_with_config(pool, config);
     tokio::spawn(auth::cleanup_expired_loop(state.db.clone()));
     tokio::spawn(alerts::check_alerts_loop(state.clone()));
     tokio::spawn(prices::price_simulator_loop(state.clone()));
@@ -545,7 +546,7 @@ pub async fn init_state() -> AppState {
 /// strips any client-supplied ones sits in front of this in production;
 /// with no proxy, they simply won't be present and the peer-IP fallback
 /// takes over.
-fn auth_rate_limited_routes() -> Router<AppState> {
+fn auth_rate_limited_routes(config: &config::Config) -> Router<AppState> {
     use tower_governor::{
         governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer,
     };
@@ -553,8 +554,8 @@ fn auth_rate_limited_routes() -> Router<AppState> {
     let config = Arc::new(
         GovernorConfigBuilder::default()
             .key_extractor(SmartIpKeyExtractor)
-            .per_second(2)
-            .burst_size(10)
+            .per_second(config.auth_rate_limit_per_second)
+            .burst_size(config.auth_rate_limit_burst)
             .finish()
             .expect("rate limiter config"),
     );
@@ -574,15 +575,15 @@ fn auth_rate_limited_routes() -> Router<AppState> {
 /// every route here already requires a session token, and keying on IP
 /// alone would mean wallets sharing a NAT/VPN/corporate network split one
 /// quota instead of each getting their own.
-fn mutation_rate_limited_routes() -> Router<AppState> {
+fn mutation_rate_limited_routes(config: &config::Config) -> Router<AppState> {
     use crate::rate_limit_key::BearerOrIpKeyExtractor;
     use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 
     let config = Arc::new(
         GovernorConfigBuilder::default()
             .key_extractor(BearerOrIpKeyExtractor)
-            .per_second(5)
-            .burst_size(20)
+            .per_second(config.mutation_rate_limit_per_second)
+            .burst_size(config.mutation_rate_limit_burst)
             .finish()
             .expect("rate limiter config"),
     );
@@ -607,11 +608,8 @@ fn mutation_rate_limited_routes() -> Router<AppState> {
         .layer(GovernorLayer { config })
 }
 
-fn request_id_header() -> axum::http::HeaderName {
-    axum::http::HeaderName::from_static("x-request-id")
-}
-
 pub fn build_router(state: AppState) -> Router {
+    let config = state.config.clone();
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
@@ -625,8 +623,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/chain", get(get_chain))
         .route("/api/v1/expiries/:underlying", get(get_expiry_calendar))
         .route("/api/v1/stats", get(get_protocol_stats))
-        .merge(auth_rate_limited_routes())
-        .merge(mutation_rate_limited_routes())
+        .merge(auth_rate_limited_routes(&config))
+        .merge(mutation_rate_limited_routes(&config))
         .route("/api/v1/auth/me", get(auth::get_me))
         .route("/api/v1/account", get(positions::get_account))
         .route("/api/v1/positions", get(positions::list_positions))

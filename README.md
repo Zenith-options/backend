@@ -22,6 +22,16 @@ cargo run
 # listening on 0.0.0.0:8081
 ```
 
+Runtime settings are loaded in precedence order: built-in defaults, an
+optional TOML file (`--config path/to/config.toml`), environment variables,
+then CLI flags. Use `ZENITH_`-prefixed variables (for example
+`ZENITH_BIND_ADDRESS=127.0.0.1:9000`) or the legacy `DATABASE_URL`. CLI flags
+use kebab-case equivalents such as `--bind-address 127.0.0.1:9000` and
+`--session-ttl-secs 3600`. Seed maps can be set in TOML or as JSON through
+`ZENITH_SEEDED_PRICES` / `ZENITH_SEEDED_VOLS`. Startup validation rejects
+invalid addresses, non-SQLite URLs, nonpositive TTL/rate limits, and invalid
+market seeds. Database URLs are redacted from the configuration's debug view.
+
 ```bash
 cargo test              # 11 unit tests + 29 integration tests
 cargo clippy --all-targets -- -D warnings

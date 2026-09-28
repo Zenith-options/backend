@@ -5,8 +5,6 @@ use rand::Rng;
 
 use crate::AppState;
 
-const MAX_PCT_MOVE_PER_TICK: f64 = 0.003; // +/-0.3%
-
 /// Nudges every spot price by a small random percentage and broadcasts the
 /// new snapshot on `state.spot_tx`, returning the JSON payload sent (or
 /// not sent, if nothing was listening — that's the common case, not an
@@ -17,8 +15,8 @@ pub fn tick_once(state: &AppState) -> String {
     let prices = {
         let mut prices = state.spot_prices.lock().unwrap();
         for price in prices.values_mut() {
-            let pct_move =
-                rand::thread_rng().gen_range(-MAX_PCT_MOVE_PER_TICK..MAX_PCT_MOVE_PER_TICK);
+            let max_move = state.config.max_pct_move_per_tick;
+            let pct_move = rand::thread_rng().gen_range(-max_move..max_move);
             *price = (*price * (1.0 + pct_move)).max(0.0001);
         }
         prices.clone()
@@ -106,10 +104,10 @@ mod tests {
         let after = state.spot_prices.lock().unwrap().clone();
         for (underlying, before_price) in &before {
             let after_price = after[underlying];
-            let max_move = before_price * MAX_PCT_MOVE_PER_TICK;
+            let max_move = before_price * state.config.max_pct_move_per_tick;
             assert!(
                 (after_price - before_price).abs() <= max_move + 1e-9,
-                "{underlying} moved from {before_price} to {after_price}, beyond the {MAX_PCT_MOVE_PER_TICK} bound"
+                "{underlying} moved from {before_price} to {after_price}, beyond the configured bound"
             );
         }
 

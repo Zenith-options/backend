@@ -9,9 +9,6 @@ use serde::{Deserialize, Serialize};
 use crate::error::{db_error, AppError, AppJson};
 use crate::AppState;
 
-const NONCE_TTL_SECS: i64 = 5 * 60;
-const SESSION_TTL_SECS: i64 = 24 * 60 * 60;
-
 fn random_token_hex(len_bytes: usize) -> String {
     let mut bytes = vec![0u8; len_bytes];
     rand::thread_rng().fill_bytes(&mut bytes);
@@ -69,7 +66,7 @@ pub async fn post_nonce(
 
     let nonce = random_token_hex(16);
     let message = format!("Sign in to Zenith\nNonce: {nonce}");
-    let expires_at = format_unix_secs(now_unix() + NONCE_TTL_SECS);
+    let expires_at = format_unix_secs(now_unix() + state.config.nonce_ttl_secs);
 
     sqlx::query("INSERT INTO auth_nonces (nonce, wallet_address, expires_at) VALUES (?, ?, ?)")
         .bind(&message)
@@ -175,7 +172,7 @@ pub async fn post_verify(
     .map_err(|e| db_error("create or confirm account", e))?;
 
     let token = random_token_hex(32);
-    let session_expires_at = format_unix_secs(now_unix() + SESSION_TTL_SECS);
+    let session_expires_at = format_unix_secs(now_unix() + state.config.session_ttl_secs);
     sqlx::query("INSERT INTO sessions (token, wallet_address, expires_at) VALUES (?, ?, ?)")
         .bind(&token)
         .bind(&req.wallet_address)
