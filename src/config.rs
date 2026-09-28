@@ -16,6 +16,9 @@ pub struct Config {
     pub mutation_rate_limit_burst: u32,
     pub seeded_prices: HashMap<String, f64>,
     pub seeded_vols: HashMap<String, f64>,
+    pub deprecated_routes: Vec<String>,
+    pub deprecation_timestamp: Option<u64>,
+    pub sunset_date: Option<String>,
 }
 
 impl Default for Config {
@@ -42,6 +45,9 @@ impl Default for Config {
                 ("ETH".into(), 0.72),
                 ("SOL".into(), 0.91),
             ]),
+            deprecated_routes: Vec::new(),
+            deprecation_timestamp: None,
+            sunset_date: None,
         }
     }
 }
@@ -66,6 +72,9 @@ impl std::fmt::Debug for Config {
             .field("mutation_rate_limit_burst", &self.mutation_rate_limit_burst)
             .field("seeded_prices", &self.seeded_prices)
             .field("seeded_vols", &self.seeded_vols)
+            .field("deprecated_routes", &self.deprecated_routes)
+            .field("deprecation_timestamp", &self.deprecation_timestamp)
+            .field("sunset_date", &self.sunset_date)
             .finish()
     }
 }
@@ -153,6 +162,18 @@ impl Config {
                 self.seeded_vols = serde_json::from_str(value)
                     .map_err(|e| format!("invalid value for {key}: {e}"))?
             }
+            "DEPRECATED_ROUTES" => {
+                self.deprecated_routes = serde_json::from_str(value)
+                    .map_err(|e| format!("invalid value for {key}: {e}"))?
+            }
+            "DEPRECATION_TIMESTAMP" => {
+                self.deprecation_timestamp = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("invalid value for {key}: expected Unix timestamp"))?,
+                )
+            }
+            "SUNSET_DATE" => self.sunset_date = Some(value.into()),
             _ => return Err(format!("unknown configuration key: {key}")),
         }
         Ok(())
@@ -196,6 +217,24 @@ impl Config {
                 "seeded prices and vols must be non-empty and finite positive values".into(),
             );
         }
+        if !self.deprecated_routes.is_empty() {
+            if self
+                .deprecated_routes
+                .iter()
+                .any(|route| !route.starts_with("/api/v1/"))
+            {
+                return Err("deprecated_routes may only contain /api/v1/ paths".into());
+            }
+            if self.deprecation_timestamp.is_none() {
+                return Err("deprecation_timestamp is required for deprecated routes".into());
+            }
+            let sunset = self
+                .sunset_date
+                .as_deref()
+                .ok_or("sunset_date is required for deprecated routes")?;
+            httpdate::parse_http_date(sunset)
+                .map_err(|_| "sunset_date must be an RFC 1123 HTTP-date".to_string())?;
+        }
         Ok(())
     }
 }
@@ -216,8 +255,10 @@ mod tests {
 
     #[test]
     fn debug_output_redacts_the_database_url() {
-        let mut config = Config::default();
-        config.database_url = "sqlite://user:password@private.db".into();
+        let config = Config {
+            database_url: "sqlite://user:password@private.db".into(),
+            ..Config::default()
+        };
         let debug = format!("{config:?}");
         assert!(!debug.contains("password"));
         assert!(debug.contains("[REDACTED]"));
@@ -225,8 +266,10 @@ mod tests {
 
     #[test]
     fn rejects_invalid_values() {
-        let mut config = Config::default();
-        config.max_pct_move_per_tick = 1.0;
+        let config = Config {
+            max_pct_move_per_tick: 1.0,
+            ..Config::default()
+        };
         assert!(config.validate().is_err());
     }
 }

@@ -12,6 +12,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 pub mod alerts;
+pub mod api_version;
 pub mod auth;
 pub mod collateral;
 pub mod config;
@@ -232,6 +233,7 @@ pub struct AppState {
     pub vol_surface: Arc<std::sync::Mutex<std::collections::HashMap<String, f64>>>,
     pub db: sqlx::SqlitePool,
     pub config: std::sync::Arc<config::Config>,
+    pub version_metrics: std::sync::Arc<api_version::VersionMetrics>,
     /// Broadcasts a JSON-encoded SpotResponse every time the price
     /// simulator nudges spot_prices, for the /api/v1/ws/spot handler to
     /// forward to connected clients. `send` errors (no receivers) are
@@ -256,6 +258,7 @@ impl AppState {
             vol_surface: Arc::new(std::sync::Mutex::new(vols)),
             db,
             config: Arc::new(config),
+            version_metrics: Arc::new(api_version::VersionMetrics::default()),
             spot_tx,
         }
     }
@@ -545,7 +548,7 @@ pub async fn init_state_with_config(config: config::Config) -> AppState {
 /// strips any client-supplied ones sits in front of this in production;
 /// with no proxy, they simply won't be present and the peer-IP fallback
 /// takes over.
-fn auth_rate_limited_routes(config: &config::Config) -> Router<AppState> {
+fn auth_rate_limited_routes(config: &config::Config, version: &str) -> Router<AppState> {
     use tower_governor::{
         governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer,
     };
@@ -560,8 +563,14 @@ fn auth_rate_limited_routes(config: &config::Config) -> Router<AppState> {
     );
 
     Router::new()
-        .route("/api/v1/auth/nonce", post(auth::post_nonce))
-        .route("/api/v1/auth/verify", post(auth::post_verify))
+        .route(
+            &format!("/api/{version}/auth/nonce"),
+            post(auth::post_nonce),
+        )
+        .route(
+            &format!("/api/{version}/auth/verify"),
+            post(auth::post_verify),
+        )
         .layer(GovernorLayer { config })
 }
 
@@ -574,7 +583,7 @@ fn auth_rate_limited_routes(config: &config::Config) -> Router<AppState> {
 /// every route here already requires a session token, and keying on IP
 /// alone would mean wallets sharing a NAT/VPN/corporate network split one
 /// quota instead of each getting their own.
-fn mutation_rate_limited_routes(config: &config::Config) -> Router<AppState> {
+fn mutation_rate_limited_routes(config: &config::Config, version: &str) -> Router<AppState> {
     use crate::rate_limit_key::BearerOrIpKeyExtractor;
     use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 
@@ -588,20 +597,32 @@ fn mutation_rate_limited_routes(config: &config::Config) -> Router<AppState> {
     );
 
     Router::new()
-        .route("/api/v1/positions/open", post(positions::open_position))
         .route(
-            "/api/v1/positions/:id/close",
+            &format!("/api/{version}/positions/open"),
+            post(positions::open_position),
+        )
+        .route(
+            &format!("/api/{version}/positions/:id/close"),
             post(positions::close_position),
         )
-        .route("/api/v1/positions/:id/roll", post(positions::roll_position))
-        .route("/api/v1/watchlist", post(watchlist::add_watchlist))
-        .route("/api/v1/alerts", post(alerts::create_alert))
         .route(
-            "/api/v1/strategies/execute",
+            &format!("/api/{version}/positions/:id/roll"),
+            post(positions::roll_position),
+        )
+        .route(
+            &format!("/api/{version}/watchlist"),
+            post(watchlist::add_watchlist),
+        )
+        .route(
+            &format!("/api/{version}/alerts"),
+            post(alerts::create_alert),
+        )
+        .route(
+            &format!("/api/{version}/strategies/execute"),
             post(strategies::execute_strategy),
         )
         .route(
-            "/api/v1/strategies/:id/close",
+            &format!("/api/{version}/strategies/:id/close"),
             post(strategies::close_strategy),
         )
         .layer(GovernorLayer { config })
@@ -622,8 +643,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/chain", get(get_chain))
         .route("/api/v1/expiries/:underlying", get(get_expiry_calendar))
         .route("/api/v1/stats", get(get_protocol_stats))
-        .merge(auth_rate_limited_routes(&config))
-        .merge(mutation_rate_limited_routes(&config))
+        .merge(auth_rate_limited_routes(&config, "v1"))
+        .merge(mutation_rate_limited_routes(&config, "v1"))
         .route("/api/v1/auth/me", get(auth::get_me))
         .route("/api/v1/account", get(positions::get_account))
         .route("/api/v1/positions", get(positions::list_positions))
@@ -646,8 +667,43 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/portfolio/greeks",
             get(positions::get_portfolio_greeks),
         )
+        .route("/api/v2/spot", get(api_version::get_spot_v2))
+        .route("/api/v2/price", get(price_option))
+        .route("/api/v2/iv", get(get_implied_vol))
+        .route("/api/v2/chain", get(get_chain))
+        .route("/api/v2/expiries/:underlying", get(get_expiry_calendar))
+        .route("/api/v2/stats", get(get_protocol_stats))
+        .merge(auth_rate_limited_routes(&config, "v2"))
+        .merge(mutation_rate_limited_routes(&config, "v2"))
+        .route("/api/v2/auth/me", get(auth::get_me))
+        .route("/api/v2/account", get(positions::get_account))
+        .route("/api/v2/positions", get(positions::list_positions))
+        .route("/api/v2/history", get(history::get_history))
+        .route("/api/v2/watchlist", get(watchlist::get_watchlist))
+        .route(
+            "/api/v2/watchlist/:underlying",
+            axum::routing::delete(watchlist::remove_watchlist),
+        )
+        .route("/api/v2/alerts", get(alerts::get_alerts))
+        .route(
+            "/api/v2/alerts/:id",
+            axum::routing::delete(alerts::delete_alert),
+        )
+        .route("/api/v2/strategies", get(strategies::list_strategies))
+        .route("/api/v2/strategies/:id", get(strategies::get_strategy))
+        .route("/api/v2/ws/spot", get(prices::ws_spot))
+        .route("/api/v2/portfolio/payoff", post(payoff::post_payoff))
+        .route(
+            "/api/v2/portfolio/greeks",
+            get(positions::get_portfolio_greeks),
+        )
+        .route("/api/versions/usage", get(api_version::usage))
         .layer(TraceLayer::new_for_http())
         .layer(axum::middleware::from_fn(error::request_context_middleware))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            api_version::track_usage_and_deprecations,
+        ))
         .layer(cors)
         .with_state(state)
 }

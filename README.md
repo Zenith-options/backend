@@ -47,6 +47,19 @@ throwaway temp-file database.
 All `/api/v1/*` endpoints marked **auth** require an
 `Authorization: Bearer <token>` header from `/api/v1/auth/verify`.
 
+The same routes are available under `/api/v2`; v2 shares handlers with v1
+where the contract is unchanged. `GET /api/v2/spot` uses the v2 DTO
+(`assets.{symbol}.{price,implied_vol}`), while v1 retains its `prices` and
+`vols` maps. `GET /api/versions/usage` reports request totals for each API
+version.
+
+Deprecation headers are opt-in and are only added to exact v1 paths listed
+in `deprecated_routes`. Configure `deprecation_timestamp` as a Unix timestamp
+and `sunset_date` as an RFC 1123 HTTP-date; deprecated routes require both.
+Equivalent environment variables are `ZENITH_DEPRECATED_ROUTES` (JSON array),
+`ZENITH_DEPRECATION_TIMESTAMP`, and `ZENITH_SUNSET_DATE`. No routes are
+deprecated by default.
+
 ### Market data (public)
 
 | Endpoint | What it does |

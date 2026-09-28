@@ -31,10 +31,14 @@ impl Drop for TestApp {
 
 impl TestApp {
     pub async fn spawn() -> Self {
+        Self::spawn_with_config(zenith_backend::config::Config::default()).await
+    }
+
+    pub async fn spawn_with_config(config: zenith_backend::config::Config) -> Self {
         let db_path = std::env::temp_dir().join(format!("zenith-test-{}.db", uuid::Uuid::new_v4()));
         let database_url = format!("sqlite://{}", db_path.display());
         let pool = zenith_backend::db::init_pool(&database_url).await;
-        let state = zenith_backend::AppState::new(pool);
+        let state = zenith_backend::AppState::new_with_config(pool, config);
         Self {
             router: zenith_backend::build_router(state),
             db_path,

@@ -2407,6 +2407,7 @@ dependencies = [
  "data-encoding",
  "dotenvy",
  "ed25519-dalek",
+ "httpdate",
  "rand",
  "serde",
  "serde_json",
