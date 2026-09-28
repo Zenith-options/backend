@@ -2,6 +2,7 @@
 async fn main() {
     zenith_backend::init_tracing();
     let state = zenith_backend::init_state().await;
+    let shutdown_state = state.clone();
     let app = zenith_backend::build_router(state);
 
     let addr = "0.0.0.0:8081";
@@ -10,7 +11,6 @@ async fn main() {
     // Needed for SmartIpKeyExtractor's peer-IP fallback (used when no
     // x-forwarded-for/x-real-ip/forwarded header is present) to have a
     // real socket address to read, rather than nothing at all.
-    let shutdown_state = state.clone();
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
