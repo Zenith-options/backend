@@ -227,4 +227,37 @@ mod tests {
         assert_eq!(first, second);
         assert!(!cache_with_flag(true, 0.0, &[]).is_enabled("example", Some("GWALLET")));
     }
+
+    #[tokio::test]
+    async fn refresh_loads_only_the_selected_environment_and_allowlist() {
+        let db_path =
+            std::env::temp_dir().join(format!("zenith-features-test-{}.db", uuid::Uuid::new_v4()));
+        let db = crate::db::init_pool(&format!("sqlite://{}", db_path.display())).await;
+        for environment in ["staging", "production"] {
+            sqlx::query(
+                "INSERT INTO feature_flags (environment, name, enabled, rollout_percent)
+                 VALUES (?, 'checkout', 1, 0)",
+            )
+            .bind(environment)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO feature_flag_wallets (environment, flag_name, wallet_address)
+             VALUES ('staging', 'checkout', 'GWALLET')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let cache = FeatureFlagCache::new("staging");
+        cache.refresh(&db).await.unwrap();
+        assert!(cache.is_enabled("checkout", Some("GWALLET")));
+        assert!(!cache.is_enabled("checkout", Some("GOTHER")));
+        assert!(!FeatureFlagCache::new("production").is_enabled("checkout", Some("GWALLET")));
+
+        db.close().await;
+        let _ = std::fs::remove_file(db_path);
+    }
 }

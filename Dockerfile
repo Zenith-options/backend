@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
 # layer only invalidates when Cargo.toml/Cargo.lock change, not on
 # every source edit.
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo "fn main() {}" > src/main.rs && echo "" > src/lib.rs
+RUN mkdir src && echo "fn main() {}" > src/main.rs && echo "fn main() {}" > src/worker.rs && echo "" > src/lib.rs
 RUN cargo build --release && rm -rf src
 
 COPY . .
@@ -26,6 +26,7 @@ WORKDIR /app
 # migrations/ isn't needed here — sqlx::migrate!() embeds the SQL files
 # into the binary at compile time, not read from disk at runtime.
 COPY --from=builder /app/target/release/zenith-backend ./
+COPY --from=builder /app/target/release/zenith-worker ./
 
 ENV DATABASE_URL=sqlite:///data/zenith.db
 VOLUME ["/data"]

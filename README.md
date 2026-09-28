@@ -7,10 +7,10 @@ a live spot-price WebSocket feed.
 
 ## Status
 
-Market data (spot prices, vol surface) is in-memory and nudged by a
-background simulator — there's no real price feed or on-chain
-integration yet. Everything else (accounts, positions, watchlist,
-alerts) persists to a SQLite file via sqlx. This is a paper-trading
+Market data (spot prices, vol surface) is cached in-process from shared
+SQLite state and nudged by the worker's simulator — there's no real price
+feed or on-chain integration yet. Everything else (accounts, positions,
+watchlist, alerts) persists to SQLite via sqlx. This is a paper-trading
 backend for the frontend to build against, not a production trading
 system.
 
@@ -18,12 +18,23 @@ system.
 
 ```bash
 cp .env.example .env   # DATABASE_URL=sqlite://zenith.db, or leave unset for the same default
-cargo run
+cargo run --bin zenith-backend
 # listening on 0.0.0.0:8081
 ```
 
+Run the background processor separately against the same database:
+
 ```bash
-cargo test              # 11 unit tests + 29 integration tests
+cargo run --bin zenith-worker
+```
+
+Only the worker claims scheduled jobs; API instances only refresh shared
+market state and feature-flag caches. Both binaries run migrations and
+share the library crate. For multiple processes, configure `DATABASE_URL`
+to the same SQLite database on storage that supports SQLite locking.
+
+```bash
+cargo test
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
@@ -132,12 +143,14 @@ unchanged otherwise — for tracing a single request through logs.
 ```
 src/
 ├── main.rs          # Thin entrypoint: init_tracing -> init_state -> build_router -> serve
+├── worker.rs        # Dedicated zenith-worker entrypoint for persistent background jobs
 ├── lib.rs           # Pricing engine, AppState, request/response types, route wiring
 ├── db.rs            # SQLite pool + migration runner
 ├── models.rs        # Row structs (Account, Position, WatchlistItem, Alert)
 ├── error.rs         # AppError: JSON {"error": "..."} instead of empty-body status codes
 ├── auth.rs          # Sign-in-with-wallet: nonce, verify, AuthUser extractor, expiry sweep
 ├── admin.rs         # Wallet roles, step-up sessions, feature/series/breaker administration
+├── features.rs      # Environment-scoped DB flags and local rollout cache
 ├── jobs.rs          # Durable job queue, retries, metrics, snapshots, exports, reconciliation
 ├── strkey.rs         # Stellar G... address <-> raw ed25519 pubkey codec
 ├── collateral.rs    # Collateral rules for writing options (100% calls, 110% puts)

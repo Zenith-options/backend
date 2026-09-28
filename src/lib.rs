@@ -522,10 +522,7 @@ pub fn init_tracing() {
         .init();
 }
 
-/// Opens the database (from DATABASE_URL / .env, default sqlite://zenith.db)
-/// and starts the persistent job runner. The dedicated worker binary is
-/// introduced separately; until then the API process hosts the runner.
-pub async fn init_state() -> AppState {
+async fn open_state() -> AppState {
     dotenvy::dotenv().ok();
     let database_url =
         std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite://zenith.db".to_string());
@@ -535,14 +532,29 @@ pub async fn init_state() -> AppState {
     admin::bootstrap_super_admins(&state.db)
         .await
         .expect("failed to bootstrap super-admin wallets");
+    prices::initialize_market_state(&state)
+        .await
+        .expect("failed to initialize shared market state");
+    state
+}
+
+/// Opens the database, initializes shared state, and starts only API-local
+/// cache refreshers. Background jobs are run by the separate worker binary.
+pub async fn init_state() -> AppState {
+    let state = open_state().await;
     state
         .feature_flags
         .refresh(&state.db)
         .await
         .expect("failed to load feature flags");
     tokio::spawn(state.feature_flags.clone().refresh_loop(state.db.clone()));
-    tokio::spawn(jobs::run_loop(state.clone()));
+    tokio::spawn(prices::refresh_market_state_loop(state.clone()));
     state
+}
+
+/// Opens the shared database and market state for the dedicated worker.
+pub async fn init_worker_state() -> AppState {
+    open_state().await
 }
 
 /// Builds the full route table over a given AppState. Split out from

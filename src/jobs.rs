@@ -362,8 +362,12 @@ async fn execute_job(state: &AppState, job: &ClaimedJob) -> Result<serde_json::V
                 .map_err(|error| error.to_string())?;
             Ok(serde_json::json!({"triggered": triggered}))
         }
-        "price_tick" => Ok(serde_json::from_str(&crate::prices::tick_once(state))
-            .map_err(|error| error.to_string())?),
+        "price_tick" => {
+            let payload = crate::prices::tick_and_persist(state)
+                .await
+                .map_err(|error| error.to_string())?;
+            serde_json::from_str(&payload).map_err(|error| error.to_string())
+        }
         "snapshot" => {
             let payload = serde_json::json!({
                 "prices": state.spot_prices.lock().map_err(|_| "price cache lock poisoned")?.clone(),

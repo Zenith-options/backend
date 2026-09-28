@@ -2,17 +2,87 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::Response;
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 
 const MAX_PCT_MOVE_PER_TICK: f64 = 0.003; // +/-0.3%
 
+#[derive(Deserialize, Serialize)]
+struct MarketStatePayload {
+    prices: std::collections::HashMap<String, f64>,
+    vols: std::collections::HashMap<String, f64>,
+}
+
+pub async fn initialize_market_state(state: &AppState) -> Result<(), sqlx::Error> {
+    let initial_payload = market_payload(state);
+    sqlx::query("INSERT OR IGNORE INTO market_state (id, payload) VALUES (1, ?)")
+        .bind(initial_payload)
+        .execute(&state.db)
+        .await?;
+    refresh_market_state(state).await?;
+    Ok(())
+}
+
+fn market_payload(state: &AppState) -> String {
+    let payload = MarketStatePayload {
+        prices: state
+            .spot_prices
+            .lock()
+            .expect("price cache lock poisoned")
+            .clone(),
+        vols: state
+            .vol_surface
+            .lock()
+            .expect("vol cache lock poisoned")
+            .clone(),
+    };
+    serde_json::to_string(&payload).expect("market state serializes")
+}
+
+fn apply_market_payload(state: &AppState, payload: &str) -> Result<bool, serde_json::Error> {
+    let market: MarketStatePayload = serde_json::from_str(payload)?;
+    let changed = {
+        let mut prices = state.spot_prices.lock().expect("price cache lock poisoned");
+        let mut vols = state.vol_surface.lock().expect("vol cache lock poisoned");
+        let changed = *prices != market.prices || *vols != market.vols;
+        *prices = market.prices;
+        *vols = market.vols;
+        changed
+    };
+    if changed {
+        let _ = state.spot_tx.send(payload.to_string());
+    }
+    Ok(changed)
+}
+
+pub async fn refresh_market_state(state: &AppState) -> Result<(), sqlx::Error> {
+    let payload: Option<(String,)> =
+        sqlx::query_as("SELECT payload FROM market_state WHERE id = 1")
+            .fetch_optional(&state.db)
+            .await?;
+    if let Some((payload,)) = payload {
+        apply_market_payload(state, &payload)
+            .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+    }
+    Ok(())
+}
+
+pub async fn refresh_market_state_loop(state: AppState) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+    loop {
+        interval.tick().await;
+        if let Err(error) = refresh_market_state(&state).await {
+            tracing::error!(error = %error, "refresh shared market state failed");
+        }
+    }
+}
+
 /// Nudges every spot price by a small random percentage and broadcasts the
 /// new snapshot on `state.spot_tx`, returning the JSON payload sent (or
 /// not sent, if nothing was listening — that's the common case, not an
 /// error). Pulled out of the loop below so a test can assert on the
-/// bounds of one tick directly instead of only observing it through a
-/// live 2-second timer.
+/// bounds of one tick directly and reused by the worker job.
 pub fn tick_once(state: &AppState) -> String {
     let prices = {
         let mut prices = state.spot_prices.lock().unwrap();
@@ -21,6 +91,7 @@ pub fn tick_once(state: &AppState) -> String {
                 rand::thread_rng().gen_range(-MAX_PCT_MOVE_PER_TICK..MAX_PCT_MOVE_PER_TICK);
             *price = (*price * (1.0 + pct_move)).max(0.0001);
         }
+
         prices.clone()
     };
     let vols = state.vol_surface.lock().unwrap().clone();
@@ -30,13 +101,38 @@ pub fn tick_once(state: &AppState) -> String {
     payload
 }
 
+pub async fn tick_and_persist(state: &AppState) -> Result<String, sqlx::Error> {
+    let mut tx = state.db.begin().await?;
+    sqlx::query(
+        "UPDATE market_state SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = 1",
+    )
+    .execute(&mut *tx)
+    .await?;
+    let (current_payload,): (String,) =
+        sqlx::query_as("SELECT payload FROM market_state WHERE id = 1")
+            .fetch_one(&mut *tx)
+            .await?;
+    apply_market_payload(state, &current_payload)
+        .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+    let payload = tick_once(state);
+    sqlx::query(
+        "UPDATE market_state SET payload = ?,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = 1",
+    )
+    .bind(&payload)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(payload)
+}
+
 pub async fn ws_spot(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
     ws.on_upgrade(move |socket| handle_spot_socket(socket, state))
 }
 
 async fn handle_spot_socket(mut socket: WebSocket, state: AppState) {
     // Send an immediate snapshot so the client has something to render
-    // before the first simulator tick (up to 2s away) arrives.
+    // before the next worker tick arrives.
     let snapshot = {
         let prices = state.spot_prices.lock().unwrap().clone();
         let vols = state.vol_surface.lock().unwrap().clone();
@@ -153,6 +249,31 @@ mod tests {
         }
 
         state.db.close().await;
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[tokio::test]
+    async fn worker_market_updates_are_visible_to_a_separate_api_state() {
+        let (worker_state, db_path) = test_state().await;
+        initialize_market_state(&worker_state).await.unwrap();
+        let second_worker = AppState::new(worker_state.db.clone());
+        initialize_market_state(&second_worker).await.unwrap();
+        worker_state
+            .spot_prices
+            .lock()
+            .unwrap()
+            .insert("BTC".into(), 71_000.0);
+        tick_and_persist(&worker_state).await.unwrap();
+        tick_and_persist(&second_worker).await.unwrap();
+
+        let api_state = AppState::new(worker_state.db.clone());
+        initialize_market_state(&api_state).await.unwrap();
+        assert_eq!(
+            api_state.spot_prices.lock().unwrap()["BTC"],
+            second_worker.spot_prices.lock().unwrap()["BTC"]
+        );
+
+        worker_state.db.close().await;
         let _ = std::fs::remove_file(&db_path);
     }
 }
