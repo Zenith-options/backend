@@ -106,6 +106,16 @@ Every response carries an `x-request-id` header — a fresh UUIDv4 if the
 request didn't already have one, or the caller's own value echoed back
 unchanged otherwise — for tracing a single request through logs.
 
+### Error responses
+
+V2 errors use `{"error":{"code":"INSUFFICIENT_BALANCE","message":"...","details":{},"request_id":"..."}}`.
+Codes are stable machine identifiers listed in `docs/error-catalogue.md`;
+`docs/error-codes.json` is the source catalogue. V1 preserves the original
+`{"error":"message"}` body by default for existing clients. V1 clients can
+request the structured shape with `X-API-Error-Format: structured`, and any
+version can request the legacy body with `X-API-Error-Format: legacy`.
+`request_id` matches the `x-request-id` response header.
+
 ## Architecture
 
 ```
@@ -114,7 +124,7 @@ src/
 ├── lib.rs           # Pricing engine, AppState, request/response types, route wiring
 ├── db.rs            # SQLite pool + migration runner
 ├── models.rs        # Row structs (Account, Position, WatchlistItem, Alert)
-├── error.rs         # AppError: JSON {"error": "..."} instead of empty-body status codes
+├── error.rs         # Stable coded error envelopes, request IDs, and v1 compatibility
 ├── auth.rs          # Sign-in-with-wallet: nonce, verify, AuthUser extractor, session cleanup
 ├── strkey.rs         # Stellar G... address <-> raw ed25519 pubkey codec
 ├── collateral.rs    # Collateral rules for writing options (100% calls, 110% puts)

@@ -9,7 +9,6 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::{f64::consts::PI, sync::Arc};
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::request_id::{PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 
 pub mod alerts;
@@ -647,12 +646,8 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/portfolio/greeks",
             get(positions::get_portfolio_greeks),
         )
-        .layer(PropagateRequestIdLayer::new(request_id_header()))
         .layer(TraceLayer::new_for_http())
-        .layer(SetRequestIdLayer::new(
-            request_id_header(),
-            request_id::MakeRequestUuid,
-        ))
+        .layer(axum::middleware::from_fn(error::request_context_middleware))
         .layer(cors)
         .with_state(state)
 }

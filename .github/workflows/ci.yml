@@ -14,6 +14,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --all-targets
       - run: cargo test
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node scripts/generate-error-catalogue.mjs
+      - run: git diff --exit-code -- docs/error-catalogue.md
 
   clippy:
     runs-on: ubuntu-latest

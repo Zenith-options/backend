@@ -54,16 +54,16 @@ impl std::fmt::Debug for Config {
             .field("nonce_ttl_secs", &self.nonce_ttl_secs)
             .field("session_ttl_secs", &self.session_ttl_secs)
             .field("max_pct_move_per_tick", &self.max_pct_move_per_tick)
-            .field("auth_rate_limit_per_second", &self.auth_rate_limit_per_second)
+            .field(
+                "auth_rate_limit_per_second",
+                &self.auth_rate_limit_per_second,
+            )
             .field("auth_rate_limit_burst", &self.auth_rate_limit_burst)
             .field(
                 "mutation_rate_limit_per_second",
                 &self.mutation_rate_limit_per_second,
             )
-            .field(
-                "mutation_rate_limit_burst",
-                &self.mutation_rate_limit_burst,
-            )
+            .field("mutation_rate_limit_burst", &self.mutation_rate_limit_burst)
             .field("seeded_prices", &self.seeded_prices)
             .field("seeded_vols", &self.seeded_vols)
             .finish()
@@ -86,10 +86,17 @@ impl Config {
         while let Some(arg) = iter.next() {
             if arg == "--config" {
                 config_path = Some(iter.next().ok_or("--config requires a path")?);
-            } else if let Some((key, value)) = arg.strip_prefix("--").and_then(|s| s.split_once('=')) {
-                cli.insert(key.replace('-', "_").to_ascii_uppercase(), value.to_string());
+            } else if let Some((key, value)) =
+                arg.strip_prefix("--").and_then(|s| s.split_once('='))
+            {
+                cli.insert(
+                    key.replace('-', "_").to_ascii_uppercase(),
+                    value.to_string(),
+                );
             } else if let Some(key) = arg.strip_prefix("--") {
-                let value = iter.next().ok_or_else(|| format!("--{key} requires a value"))?;
+                let value = iter
+                    .next()
+                    .ok_or_else(|| format!("--{key} requires a value"))?;
                 cli.insert(key.replace('-', "_").to_ascii_uppercase(), value);
             } else {
                 return Err(format!("unexpected argument: {arg}"));
@@ -122,13 +129,11 @@ impl Config {
 
     fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
         macro_rules! parse {
-            ($field:ident, $type:ty) => {
-                {
-                    self.$field = value
-                        .parse::<$type>()
-                        .map_err(|_| format!("invalid value for {}: expected {}", key, stringify!($type)))?;
-                }
-            };
+            ($field:ident, $type:ty) => {{
+                self.$field = value.parse::<$type>().map_err(|_| {
+                    format!("invalid value for {}: expected {}", key, stringify!($type))
+                })?;
+            }};
         }
         match key {
             "BIND_ADDRESS" => self.bind_address = value.into(),
@@ -177,11 +182,19 @@ impl Config {
             return Err("rate-limit values must be positive".into());
         }
         if self.seeded_prices.is_empty()
-            || self.seeded_prices.values().any(|v| !v.is_finite() || *v <= 0.0)
+            || self
+                .seeded_prices
+                .values()
+                .any(|v| !v.is_finite() || *v <= 0.0)
             || self.seeded_vols.is_empty()
-            || self.seeded_vols.values().any(|v| !v.is_finite() || *v <= 0.0)
+            || self
+                .seeded_vols
+                .values()
+                .any(|v| !v.is_finite() || *v <= 0.0)
         {
-            return Err("seeded prices and vols must be non-empty and finite positive values".into());
+            return Err(
+                "seeded prices and vols must be non-empty and finite positive values".into(),
+            );
         }
         Ok(())
     }

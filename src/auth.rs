@@ -6,7 +6,7 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{db_error, AppError, AppJson};
+use crate::error::{db_error, AppError, AppJson, ErrorCode};
 use crate::AppState;
 
 fn random_token_hex(len_bytes: usize) -> String {
@@ -61,7 +61,8 @@ pub async fn post_nonce(
         return Err(AppError::new(
             StatusCode::BAD_REQUEST,
             "wallet_address is not a valid Stellar G... address",
-        ));
+        )
+        .with_code(ErrorCode::InvalidCredentials));
     }
 
     let nonce = random_token_hex(16);
@@ -135,22 +136,26 @@ pub async fn post_verify(
                 StatusCode::BAD_REQUEST,
                 "wallet_address is not a valid Stellar G... address",
             )
+            .with_code(ErrorCode::InvalidCredentials)
         })?;
     let verifying_key = VerifyingKey::from_bytes(&pubkey_bytes).map_err(|_| {
         AppError::new(
             StatusCode::BAD_REQUEST,
             "wallet_address decodes to an invalid ed25519 key",
         )
+        .with_code(ErrorCode::InvalidCredentials)
     })?;
 
-    let sig_bytes = BASE64
-        .decode(req.signature.as_bytes())
-        .map_err(|_| AppError::new(StatusCode::BAD_REQUEST, "signature is not valid base64"))?;
+    let sig_bytes = BASE64.decode(req.signature.as_bytes()).map_err(|_| {
+        AppError::new(StatusCode::BAD_REQUEST, "signature is not valid base64")
+            .with_code(ErrorCode::InvalidCredentials)
+    })?;
     let sig_array: [u8; 64] = sig_bytes.try_into().map_err(|_| {
         AppError::new(
             StatusCode::BAD_REQUEST,
             "signature must be exactly 64 bytes",
         )
+        .with_code(ErrorCode::InvalidCredentials)
     })?;
     let signature = Signature::from_bytes(&sig_array);
 
@@ -161,6 +166,7 @@ pub async fn post_verify(
                 StatusCode::UNAUTHORIZED,
                 "signature does not verify against wallet_address for this message",
             )
+            .with_code(ErrorCode::InvalidCredentials)
         })?;
 
     sqlx::query(

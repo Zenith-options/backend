@@ -6,7 +6,7 @@ use sqlx::{Sqlite, Transaction};
 
 use crate::auth::AuthUser;
 use crate::collateral::collateral_required;
-use crate::error::{db_error, AppError, AppJson, AppQuery};
+use crate::error::{db_error, AppError, AppJson, AppQuery, ErrorCode};
 use crate::models::{Account, Position};
 use crate::{black_scholes, smile_vol, AppState, BSInputs, BSResult};
 
@@ -206,7 +206,8 @@ pub(crate) async fn open_position_in_tx(
         return Err(AppError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "insufficient buying power: this trade's premium/collateral would exceed balance minus locked collateral",
-        ));
+        )
+        .with_code(ErrorCode::InsufficientBalance));
     }
 
     sqlx::query("UPDATE accounts SET balance = ?, collateral_locked = ? WHERE wallet_address = ?")
