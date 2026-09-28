@@ -19,6 +19,7 @@ pub mod db;
 pub mod error;
 pub mod health;
 pub mod history;
+pub mod logging;
 pub mod metrics;
 pub mod models;
 pub mod payoff;
@@ -494,13 +495,17 @@ pub fn init_tracing() {
     use tracing_subscriber::prelude::*;
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "zenith_backend=info,tower_http=debug".into());
+        .unwrap_or_else(|_| "zenith_backend=info,tower_http=debug,http_access=info".into());
     tracing_subscriber::registry()
         .with(
             metrics::SqlxQueryMetricsLayer::new()
                 .with_filter(tracing_subscriber::filter::LevelFilter::TRACE),
         )
-        .with(tracing_subscriber::fmt::layer().with_filter(filter))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .event_format(logging::JsonEventFormatter)
+                .with_filter(filter),
+        )
         .init();
 }
 
@@ -655,6 +660,7 @@ pub fn build_router(state: AppState) -> Router {
             request_id::MakeRequestUuid,
         ))
         .layer(cors)
+        .layer(axum::middleware::from_fn(logging::access_log))
         .with_state(state)
 }
 

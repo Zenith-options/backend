@@ -227,6 +227,7 @@ impl FromRequestParts<AppState> for AuthUser {
             return Err(AppError::new(StatusCode::UNAUTHORIZED, "session expired"));
         }
 
+        crate::logging::set_wallet_identity(&parts.extensions, &wallet_address);
         Ok(AuthUser(wallet_address))
     }
 }

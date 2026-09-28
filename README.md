@@ -98,6 +98,11 @@ deleted.
 Every response carries an `x-request-id` header — a fresh UUIDv4 if the
 request didn't already have one, or the caller's own value echoed back
 unchanged otherwise — for tracing a single request through logs.
+Logs are emitted as JSON with stable timestamp, level, target, message,
+request ID, and trace ID fields. Sensitive field names and recognizable
+bearer tokens, signatures, nonces, API keys, and emails are redacted.
+Each request also emits one access event with route, status, latency, and
+a SHA-256 wallet hash when authenticated.
 
 ## Architecture
 
