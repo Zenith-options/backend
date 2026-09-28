@@ -52,6 +52,9 @@ pub async fn execute_strategy(
     tx.commit()
         .await
         .map_err(|e| db_error("commit strategy transaction", e))?;
+    for position in &opened {
+        crate::positions::notify_filled(&state, position).await;
+    }
     Ok(Json(opened))
 }
 
@@ -247,6 +250,9 @@ pub async fn close_strategy(
     tx.commit()
         .await
         .map_err(|e| db_error("commit close-strategy transaction", e))?;
+    for position in &closed {
+        crate::positions::notify_settled(&state, position).await;
+    }
     Ok(Json(closed))
 }
 
