@@ -30,18 +30,6 @@ pub fn tick_once(state: &AppState) -> String {
     payload
 }
 
-/// There's no real market feed behind this yet — it exists so the WS
-/// endpoint (and the frontend's ticking price displays) has something
-/// live to show instead of the static values AppState::new() seeds at
-/// startup.
-pub async fn price_simulator_loop(state: AppState) {
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
-    loop {
-        interval.tick().await;
-        tick_once(&state);
-    }
-}
-
 pub async fn ws_spot(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
     ws.on_upgrade(move |socket| handle_spot_socket(socket, state))
 }

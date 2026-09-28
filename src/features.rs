@@ -41,19 +41,21 @@ impl FeatureFlagCache {
     }
 
     pub async fn refresh(&self, db: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
+        let mut tx = db.begin().await?;
         let rows: Vec<(String, bool, f64)> = sqlx::query_as(
             "SELECT name, enabled, rollout_percent FROM feature_flags WHERE environment = ?",
         )
         .bind(self.environment())
-        .fetch_all(db)
+        .fetch_all(&mut *tx)
         .await?;
 
         let wallets: Vec<(String, String)> = sqlx::query_as(
             "SELECT flag_name, wallet_address FROM feature_flag_wallets WHERE environment = ?",
         )
         .bind(self.environment())
-        .fetch_all(db)
+        .fetch_all(&mut *tx)
         .await?;
+        tx.commit().await?;
 
         let mut flags = rows
             .into_iter()

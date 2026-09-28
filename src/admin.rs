@@ -69,7 +69,7 @@ fn bearer_token(headers: &HeaderMap) -> Result<&str, AppError> {
         .ok_or_else(|| AppError::new(StatusCode::UNAUTHORIZED, "missing or invalid bearer token"))
 }
 
-async fn require_role(
+pub async fn require_admin_access(
     state: &AppState,
     wallet: &str,
     headers: &HeaderMap,
@@ -140,7 +140,7 @@ pub async fn post_step_up_nonce(
     AuthUser(wallet): AuthUser,
     headers: HeaderMap,
 ) -> Result<Json<StepUpChallenge>, AppError> {
-    require_role(&state, &wallet, &headers, AdminRole::Viewer, false).await?;
+    require_admin_access(&state, &wallet, &headers, AdminRole::Viewer, false).await?;
     let token = bearer_token(&headers)?;
     let mut random = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut random);
@@ -180,7 +180,7 @@ pub async fn post_step_up_verify(
     headers: HeaderMap,
     AppJson(request): AppJson<StepUpVerifyRequest>,
 ) -> Result<Json<StepUpResponse>, AppError> {
-    require_role(&state, &wallet, &headers, AdminRole::Viewer, false).await?;
+    require_admin_access(&state, &wallet, &headers, AdminRole::Viewer, false).await?;
     let token = bearer_token(&headers)?;
     let challenge: Option<(String,)> = sqlx::query_as(
         "SELECT nonce FROM admin_step_up_nonces
@@ -285,7 +285,7 @@ pub async fn get_admin_features(
     AuthUser(wallet): AuthUser,
     headers: HeaderMap,
 ) -> Result<Json<Vec<FeatureAdminRow>>, AppError> {
-    require_role(&state, &wallet, &headers, AdminRole::Viewer, false).await?;
+    require_admin_access(&state, &wallet, &headers, AdminRole::Viewer, false).await?;
     let flags: Vec<(String, bool, f64)> = sqlx::query_as(
         "SELECT name, enabled, rollout_percent FROM feature_flags WHERE environment = ? ORDER BY name",
     )
@@ -329,7 +329,7 @@ pub async fn put_admin_feature(
     Path(name): Path<String>,
     AppJson(request): AppJson<UpsertFeatureRequest>,
 ) -> Result<StatusCode, AppError> {
-    require_role(&state, &wallet, &headers, AdminRole::Operator, true).await?;
+    require_admin_access(&state, &wallet, &headers, AdminRole::Operator, true).await?;
     if name.trim().is_empty()
         || name.len() > 128
         || !request.rollout_percent.is_finite()
@@ -406,7 +406,7 @@ pub async fn delete_admin_feature(
     headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    require_role(&state, &wallet, &headers, AdminRole::Operator, true).await?;
+    require_admin_access(&state, &wallet, &headers, AdminRole::Operator, true).await?;
     let result = sqlx::query("DELETE FROM feature_flags WHERE environment = ? AND name = ?")
         .bind(state.feature_flags.environment())
         .bind(name)
@@ -440,7 +440,7 @@ pub async fn get_series(
     AuthUser(wallet): AuthUser,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Series>>, AppError> {
-    require_role(&state, &wallet, &headers, AdminRole::Viewer, false).await?;
+    require_admin_access(&state, &wallet, &headers, AdminRole::Viewer, false).await?;
     let rows: Vec<(String, String, String, bool)> = sqlx::query_as(
         "SELECT id, underlying, expires_at, active FROM admin_series ORDER BY expires_at",
     )
@@ -477,7 +477,7 @@ pub async fn post_series(
     headers: HeaderMap,
     AppJson(request): AppJson<CreateSeriesRequest>,
 ) -> Result<Json<Series>, AppError> {
-    require_role(&state, &wallet, &headers, AdminRole::Operator, true).await?;
+    require_admin_access(&state, &wallet, &headers, AdminRole::Operator, true).await?;
     if request.underlying.trim().is_empty() || request.expires_at.trim().is_empty() {
         return Err(AppError::new(
             StatusCode::BAD_REQUEST,
@@ -509,7 +509,7 @@ pub async fn delete_series(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    require_role(&state, &wallet, &headers, AdminRole::Operator, true).await?;
+    require_admin_access(&state, &wallet, &headers, AdminRole::Operator, true).await?;
     let deleted = sqlx::query("DELETE FROM admin_series WHERE id = ?")
         .bind(id)
         .execute(&state.db)
@@ -535,7 +535,7 @@ pub async fn get_circuit_breakers(
     AuthUser(wallet): AuthUser,
     headers: HeaderMap,
 ) -> Result<Json<Vec<CircuitBreaker>>, AppError> {
-    require_role(&state, &wallet, &headers, AdminRole::Viewer, false).await?;
+    require_admin_access(&state, &wallet, &headers, AdminRole::Viewer, false).await?;
     let rows: Vec<(String, bool, String, String, String)> = sqlx::query_as(
         "SELECT name, tripped, reason, changed_by, updated_at FROM circuit_breakers ORDER BY name",
     )
@@ -571,7 +571,7 @@ pub async fn put_circuit_breaker(
     Path(name): Path<String>,
     AppJson(request): AppJson<SetCircuitBreakerRequest>,
 ) -> Result<StatusCode, AppError> {
-    require_role(&state, &wallet, &headers, AdminRole::RiskAdmin, true).await?;
+    require_admin_access(&state, &wallet, &headers, AdminRole::RiskAdmin, true).await?;
     if name != "trading" {
         return Err(AppError::new(
             StatusCode::NOT_FOUND,
@@ -616,7 +616,7 @@ pub async fn get_user(
     headers: HeaderMap,
     Path(target_wallet): Path<String>,
 ) -> Result<Json<AdminUserInfo>, AppError> {
-    require_role(&state, &wallet, &headers, AdminRole::Viewer, false).await?;
+    require_admin_access(&state, &wallet, &headers, AdminRole::Viewer, false).await?;
     let roles: Vec<(String,)> =
         sqlx::query_as("SELECT role FROM admin_roles WHERE wallet_address = ? ORDER BY role")
             .bind(&target_wallet)
@@ -651,7 +651,7 @@ pub async fn post_user_role(
     Path(target_wallet): Path<String>,
     AppJson(request): AppJson<GrantRoleRequest>,
 ) -> Result<StatusCode, AppError> {
-    require_role(&state, &wallet, &headers, AdminRole::SuperAdmin, true).await?;
+    require_admin_access(&state, &wallet, &headers, AdminRole::SuperAdmin, true).await?;
     crate::strkey::decode_stellar_public_key(&target_wallet).map_err(|_| {
         AppError::new(
             StatusCode::BAD_REQUEST,
@@ -677,7 +677,7 @@ pub async fn delete_user_role(
     headers: HeaderMap,
     Path((target_wallet, role)): Path<(String, String)>,
 ) -> Result<StatusCode, AppError> {
-    require_role(&state, &wallet, &headers, AdminRole::SuperAdmin, true).await?;
+    require_admin_access(&state, &wallet, &headers, AdminRole::SuperAdmin, true).await?;
     if !["viewer", "operator", "risk_admin", "super_admin"].contains(&role.as_str()) {
         return Err(AppError::new(StatusCode::BAD_REQUEST, "unknown admin role"));
     }

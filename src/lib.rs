@@ -20,6 +20,7 @@ pub mod db;
 pub mod error;
 pub mod features;
 pub mod history;
+pub mod jobs;
 pub mod models;
 pub mod payoff;
 pub mod positions;
@@ -522,8 +523,8 @@ pub fn init_tracing() {
 }
 
 /// Opens the database (from DATABASE_URL / .env, default sqlite://zenith.db)
-/// and spawns the background loops (auth cleanup, alert checks, price
-/// simulator) against it.
+/// and starts the persistent job runner. The dedicated worker binary is
+/// introduced separately; until then the API process hosts the runner.
 pub async fn init_state() -> AppState {
     dotenvy::dotenv().ok();
     let database_url =
@@ -540,9 +541,7 @@ pub async fn init_state() -> AppState {
         .await
         .expect("failed to load feature flags");
     tokio::spawn(state.feature_flags.clone().refresh_loop(state.db.clone()));
-    tokio::spawn(auth::cleanup_expired_loop(state.db.clone()));
-    tokio::spawn(alerts::check_alerts_loop(state.clone()));
-    tokio::spawn(prices::price_simulator_loop(state.clone()));
+    tokio::spawn(jobs::run_loop(state.clone()));
     state
 }
 
@@ -678,6 +677,23 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/admin/users/:wallet/roles/:role",
             axum::routing::delete(admin::delete_user_role),
+        )
+        .route(
+            "/api/v1/admin/jobs",
+            get(jobs::get_admin_jobs).post(jobs::post_admin_job),
+        )
+        .route(
+            "/api/v1/admin/jobs/metrics",
+            get(jobs::get_admin_job_metrics),
+        )
+        .route("/api/v1/admin/jobs/:id/retry", post(jobs::retry_admin_job))
+        .route(
+            "/api/v1/admin/jobs/:id/artifact",
+            get(jobs::get_admin_job_artifact),
+        )
+        .route(
+            "/api/v1/admin/reconciliation",
+            get(jobs::get_reconciliation_runs).post(jobs::post_reconciliation),
         )
         .merge(auth_rate_limited_routes())
         .merge(mutation_rate_limited_routes())

@@ -89,8 +89,8 @@ requiring a session — see `mutation_rate_limited_routes()` in `lib.rs`.
 | `GET` / `POST /api/v1/alerts` | List / create a price alert (`above`/`below` a target) |
 | `DELETE /api/v1/alerts/:id` | Remove an alert |
 
-Alerts are checked against spot every 10s by a background task; a
-triggered alert stays in the table (visible via GET) rather than being
+Alerts are checked against spot every 10s by a persistent background job;
+a triggered alert stays in the table (visible via GET) rather than being
 deleted.
 
 ### Administration **auth**
@@ -110,9 +110,18 @@ challenge, valid for ten minutes.
 | `GET` / `PUT /api/v1/admin/circuit-breakers/:name` | Inspect or trip/reset the trading circuit breaker |
 | `GET /api/v1/admin/users/:wallet` | Look up account creation and assigned admin roles |
 | `POST /api/v1/admin/users/:wallet/roles`, `DELETE /roles/:role` | Grant/revoke roles (super_admin only) |
+| `GET` / `POST /api/v1/admin/jobs` | View queued work or enqueue supported job kinds |
+| `GET /api/v1/admin/jobs/metrics`, `POST /:id/retry` | Inspect job metrics or retry a dead-lettered job |
+| `GET /api/v1/admin/jobs/:id/artifact` | Retrieve a persisted export artifact |
+| `GET` / `POST /api/v1/admin/reconciliation` | View reports or enqueue a risk-admin reconciliation |
 
 The `trading` circuit breaker pauses new position and strategy opens;
-closing existing positions remains available.
+closing existing positions remains available. The persistent job queue
+uses SQLite leases for cross-process claims, exponential retry backoff,
+timeouts, dead-letter state, and per-attempt metrics. It schedules auth
+cleanup, alert checks, price ticks, market snapshots, retention, and daily
+JSON exports; exports and reconciliation reports are retained in SQLite.
+Set `ZENITH_RETENTION_DAYS` (default `90`) to control snapshot retention.
 
 Every response carries an `x-request-id` header — a fresh UUIDv4 if the
 request didn't already have one, or the caller's own value echoed back
@@ -127,7 +136,9 @@ src/
 ├── db.rs            # SQLite pool + migration runner
 ├── models.rs        # Row structs (Account, Position, WatchlistItem, Alert)
 ├── error.rs         # AppError: JSON {"error": "..."} instead of empty-body status codes
-├── auth.rs          # Sign-in-with-wallet: nonce, verify, AuthUser extractor, session cleanup
+├── auth.rs          # Sign-in-with-wallet: nonce, verify, AuthUser extractor, expiry sweep
+├── admin.rs         # Wallet roles, step-up sessions, feature/series/breaker administration
+├── jobs.rs          # Durable job queue, retries, metrics, snapshots, exports, reconciliation
 ├── strkey.rs         # Stellar G... address <-> raw ed25519 pubkey codec
 ├── collateral.rs    # Collateral rules for writing options (100% calls, 110% puts)
 ├── payoff.rs         # Combined multi-leg P&L math (ported from the frontend's lib/payoff.ts)
@@ -135,7 +146,7 @@ src/
 ├── strategies.rs     # Multi-leg atomic execution, built on positions.rs's tx helpers
 ├── history.rs         # Closed/rolled positions + stats
 ├── request_id.rs      # UUIDv4 generator for the x-request-id middleware
-├── watchlist.rs, alerts.rs, prices.rs  # Per-domain CRUD + background loops
+├── watchlist.rs, alerts.rs, prices.rs  # Per-domain CRUD + worker task logic
 migrations/           # One file per schema change, embedded into the binary at compile time
 tests/
 ├── common/mod.rs     # TestApp: real router over a throwaway temp-file DB, via tower::oneshot
