@@ -103,6 +103,35 @@ Every response carries an `x-request-id` header — a fresh UUIDv4 if the
 request didn't already have one, or the caller's own value echoed back
 unchanged otherwise — for tracing a single request through logs.
 
+### Supply-chain checks and releases
+
+Pull requests run `cargo deny check` for advisories, licenses, duplicate
+crates, and registry/source policy. A weekly scheduled `cargo audit`
+files or comments on an issue when RustSec advisories are found.
+Publishing a GitHub Release generates a CycloneDX JSON SBOM and attaches
+`sbom.json` to that release. Dependabot checks Cargo and GitHub Actions
+dependencies weekly.
+
+### Kubernetes
+
+The Helm chart is in `deploy/helm/zenith-backend`. Install staging or
+production with:
+
+```bash
+helm upgrade --install zenith deploy/helm/zenith-backend \
+  --namespace zenith --create-namespace \
+  -f deploy/helm/zenith-backend/values-production.yaml
+```
+
+The External Secrets Operator and a Prometheus Adapter exposing
+`http_requests_per_second` must be installed in the cluster. The External
+Secret must provide `DATABASE_URL` and `REDIS_URL`; set the database URL
+to `sqlite:///data/zenith.db` when using the chart's shared volume. The
+chart requests a ReadWriteMany PVC for the API and worker. This preserves
+SQLite data across pods but does **not** make SQLite a safe multi-writer
+database: use a single API replica or migrate to a server database before
+using horizontal scaling for production traffic.
+
 ## Architecture
 
 ```

@@ -2,6 +2,7 @@
 name = "zenith-backend"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 [[bin]]
 name = "zenith-backend"
@@ -23,6 +24,7 @@ data-encoding = "2"
 rand = "0.8"
 redis = { version = "0.27", features = ["tokio-comp"] }
 sha2 = "0.10"
+prometheus = "0.13"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

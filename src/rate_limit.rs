@@ -6,6 +6,7 @@ use axum::{
     response::Response,
 };
 use redis::Script;
+use prometheus::{IntCounterVec, Opts, Registry};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
@@ -40,6 +41,46 @@ return {allowed and 1 or 0, remaining, reset, retry}
 pub struct RateLimiter {
     redis: Option<redis::Client>,
     fallback: Arc<Mutex<HashMap<String, Bucket>>>,
+}
+
+#[derive(Clone)]
+pub struct Metrics {
+    registry: Arc<Registry>,
+    requests: IntCounterVec,
+}
+
+impl Metrics {
+    pub fn new() -> Self {
+        let registry = Arc::new(Registry::new());
+        let requests = IntCounterVec::new(
+            Opts::new(
+                "zenith_http_requests_total",
+                "HTTP requests by method and response status",
+            ),
+            &["method", "status"],
+        )
+        .expect("valid HTTP request metric definition");
+        registry
+            .register(Box::new(requests.clone()))
+            .expect("unique HTTP request metric");
+        Self { registry, requests }
+    }
+
+    pub fn record(&self, method: &str, status: StatusCode) {
+        self.requests
+            .with_label_values(&[method, status.as_str()])
+            .inc();
+    }
+
+    pub fn gather(&self) -> Vec<prometheus::proto::MetricFamily> {
+        self.registry.gather()
+    }
+}
+
+impl Default for Metrics {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -260,7 +301,7 @@ pub async fn middleware(
     next: Next,
 ) -> Response {
     let path = request.uri().path();
-    if matches!(path, "/health" | "/livez" | "/readyz") {
+    if matches!(path, "/health" | "/livez" | "/readyz" | "/metrics") {
         return next.run(request).await;
     }
 
@@ -301,11 +342,14 @@ pub async fn middleware(
             header::RETRY_AFTER,
             HeaderValue::from(decision.retry_seconds.min(u64::from(u32::MAX)) as u32),
         );
+        state.metrics.record(request.method().as_str(), response.status());
         return response;
     }
 
+    let method = request.method().as_str().to_owned();
     let mut response = next.run(request).await;
     apply_headers(response.headers_mut(), limit, decision);
+    state.metrics.record(&method, response.status());
     response
 }
 

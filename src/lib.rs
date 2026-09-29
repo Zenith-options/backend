@@ -1,9 +1,9 @@
 use axum::http::Method;
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     middleware,
-    response::Json,
+    response::{IntoResponse, Json},
     routing::{get, post},
     Router,
 };
@@ -240,6 +240,7 @@ pub struct AppState {
     pub spot_tx: tokio::sync::broadcast::Sender<String>,
     pub rate_limiter: rate_limit::RateLimiter,
     pub redis: Option<redis::Client>,
+    pub metrics: rate_limit::Metrics,
 }
 
 impl AppState {
@@ -266,6 +267,7 @@ impl AppState {
             rate_limiter: rate_limit::RateLimiter::new(None)
                 .expect("in-process rate limiter does not require configuration"),
             redis: None,
+            metrics: rate_limit::Metrics::new(),
         }
     }
 }
@@ -357,6 +359,19 @@ async fn health(State(state): State<AppState>) -> Result<Json<serde_json::Value>
 
 async fn livez() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "ok" }))
+}
+
+async fn metrics(State(state): State<AppState>) -> Result<impl IntoResponse, StatusCode> {
+    use prometheus::Encoder;
+
+    let encoder = prometheus::TextEncoder::new();
+    let mut body = Vec::new();
+    encoder
+        .encode(&state.metrics.gather(), &mut body)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let body = String::from_utf8(body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let content_type = encoder.format_type().to_owned();
+    Ok(([(header::CONTENT_TYPE, content_type)], body))
 }
 
 async fn get_spot(State(state): State<AppState>) -> Json<SpotResponse> {
@@ -562,6 +577,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/livez", get(livez))
         .route("/readyz", get(health))
+        .route("/metrics", get(metrics))
         .route("/api/v1/spot", get(get_spot))
         .route("/api/v1/price", get(price_option))
         .route("/api/v1/iv", get(get_implied_vol))
