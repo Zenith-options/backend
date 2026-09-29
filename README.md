@@ -23,7 +23,9 @@ cargo run
 ```
 
 ```bash
-cargo test              # 11 unit tests + 29 integration tests
+cargo nextest run --workspace --all-targets --profile ci
+cargo llvm-cov --workspace --all-targets --json --output-path coverage.json
+python3 scripts/coverage_report.py coverage.json
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
@@ -31,6 +33,67 @@ cargo fmt --check
 No external services required — sqlx creates and migrates the SQLite
 file on first run, and every integration test spins up its own
 throwaway temp-file database.
+
+Nextest runs each test case in its own process and emits JUnit to
+`target/nextest/ci/junit.xml`. Tests explicitly suffixed `_flaky` receive
+two fixed-delay retries; there are no tests currently marked flaky.
+Coverage floors for every library module are in
+`coverage-thresholds.json`. Pull requests compare line coverage against
+their base revision and update a sticky PR comment.
+
+## Load testing
+
+Install k6, start the API, and create authenticated test sessions before
+running the suite:
+
+```bash
+node scripts/create_k6_tokens.mjs > /tmp/k6-tokens.txt
+TRADER_TOKENS="$(cat /tmp/k6-tokens.txt)" \
+  K6_VUS=10 K6_DURATION=2m k6 run loadtests/scenarios.js
+```
+
+The scenarios cover anonymous market-data browsing, authenticated
+position open/roll/close and strategy execution, spot WebSocket
+subscribers, and frequent alert creation/deletion. `BASE_URL`,
+`K6_VUS`, and `K6_DURATION` can be set for another environment or a
+shorter local run. The default budgets are HTTP failure rate below 1%,
+p95 latency below 750 ms, p99 below 1.5 s, and successful checks above
+99%. CI runs the same scenarios with two VUs for 20 seconds.
+
+## Releases, images, and deployments
+
+PR titles must use Conventional Commit types (for example,
+`feat: add volatility surface endpoint`). On merges to `main`,
+release-plz opens or updates a version/changelog PR. Merging that PR
+creates the Git tag and GitHub release; the release workflow attaches
+Linux amd64/arm64 binaries and an SPDX SBOM. The container pipeline
+builds, smoke-tests, scans, signs, and publishes amd64/arm64 images to
+GHCR, with BuildKit SBOM and SLSA provenance attestations.
+
+Set the `RELEASE_PLZ_TOKEN` repository secret to a fine-grained token
+with repository contents and pull-request write access. Using a PAT
+instead of the default workflow token allows the resulting release/tag
+events to start the binary and image publishing workflows.
+
+The staging and production workflows intentionally expose deployment
+commands rather than assuming a cloud provider. Configure the
+`staging` GitHub environment with `DEPLOY_COMMAND` and
+`ROLLBACK_COMMAND` secrets plus a `HEALTH_URL` variable. Each command
+receives `IMAGE`, `GHCR_USERNAME`, and `GHCR_TOKEN` in its environment;
+deploy commands must update the environment to that image, and rollback
+commands must restore the previous healthy revision. Map any additional
+provider credentials required by the commands into the deployment steps
+in the workflow. Successful main-branch image builds deploy
+automatically to staging. Failed deploys or health checks trigger the
+rollback command. For production, configure the `production` GitHub
+environment with the same values and required reviewers in GitHub's
+environment protection settings, then manually run **Promote
+production** with an existing GHCR tag. The health check retries for
+up to two minutes before invoking rollback.
+
+The runtime container uses a distroless non-root image, persists SQLite
+under `/data`, and is built with cargo-chef dependency caching. Its
+health endpoint is `/health`.
 
 ## Endpoints
 
@@ -146,9 +209,9 @@ real theta-decay model.
   a random-walk simulator, not sourced from anywhere real.
 - No on-chain / Soroban integration — this is pure off-chain paper
   trading.
-- `Dockerfile` and the CI workflow are not build/run-tested against a
-  real Docker daemon or GitHub Actions runner from this environment —
-  reviewed for correctness, not executed end-to-end.
+- Automated deployment is provider-neutral and requires environment
+  commands, health URLs, and production approval reviewers to be
+  configured in GitHub before deployment workflows can succeed.
 - The mutation rate limiter's bearer-token fallback (for requests with
   no token at all) keys on peer IP only, without replicating
   SmartIpKeyExtractor's x-forwarded-for/x-real-ip/forwarded header
