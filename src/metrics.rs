@@ -289,19 +289,31 @@ impl<S: Subscriber> Layer<S> for SqlxQueryMetricsLayer {
         }
         let mut visitor = QueryDurationVisitor::default();
         event.record(&mut visitor);
-        global().record_database_query(visitor.elapsed.as_deref().and_then(parse_duration));
+        let duration = visitor
+            .elapsed_secs
+            .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
+            .or_else(|| visitor.elapsed.as_deref().and_then(parse_duration));
+        global().record_database_query(duration);
+        crate::telemetry::record_database_query(duration);
     }
 }
 
 #[derive(Default)]
 struct QueryDurationVisitor {
     elapsed: Option<String>,
+    elapsed_secs: Option<f64>,
 }
 
 impl tracing::field::Visit for QueryDurationVisitor {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         if field.name() == "elapsed" {
             self.elapsed = Some(format!("{value:?}"));
+        }
+    }
+
+    fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
+        if field.name() == "elapsed_secs" && value.is_finite() && value >= 0.0 {
+            self.elapsed_secs = Some(value);
         }
     }
 }

@@ -29,6 +29,7 @@ pub mod rate_limit_key;
 pub mod request_id;
 pub mod strategies;
 pub mod strkey;
+pub mod telemetry;
 pub mod watchlist;
 
 use error::AppQuery;
@@ -494,11 +495,17 @@ async fn get_protocol_stats(State(state): State<AppState>) -> Json<serde_json::V
 pub fn init_tracing() {
     use tracing_subscriber::prelude::*;
 
+    telemetry::install_provider();
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "zenith_backend=info,tower_http=debug,http_access=info".into());
     tracing_subscriber::registry()
         .with(
             metrics::SqlxQueryMetricsLayer::new()
+                .with_filter(tracing_subscriber::filter::LevelFilter::TRACE),
+        )
+        .with(
+            tracing_opentelemetry::layer()
+                .with_tracer(opentelemetry::global::tracer("zenith-backend"))
                 .with_filter(tracing_subscriber::filter::LevelFilter::TRACE),
         )
         .with(
@@ -655,6 +662,7 @@ pub fn build_router(state: AppState) -> Router {
         .layer(PropagateRequestIdLayer::new(request_id_header()))
         .layer(TraceLayer::new_for_http())
         .layer(axum::middleware::from_fn(metrics::request_metrics))
+        .layer(axum::middleware::from_fn(telemetry::request_trace))
         .layer(SetRequestIdLayer::new(
             request_id_header(),
             request_id::MakeRequestUuid,

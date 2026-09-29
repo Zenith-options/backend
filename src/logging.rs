@@ -18,6 +18,7 @@ const REDACTED: &str = "[REDACTED]";
 #[derive(Default)]
 pub struct AccessContext {
     wallet_hash: Option<String>,
+    trace_id: Option<String>,
 }
 
 pub fn set_wallet_identity(extensions: &Extensions, wallet_address: &str) {
@@ -27,20 +28,35 @@ pub fn set_wallet_identity(extensions: &Extensions, wallet_address: &str) {
     }
 }
 
+pub fn set_trace_id(extensions: &Extensions, trace_id: &str) {
+    if let Some(context) = extensions.get::<Arc<Mutex<AccessContext>>>() {
+        context.lock().unwrap().trace_id = Some(trace_id.to_owned());
+    }
+}
+
+pub fn access_context(extensions: &mut Extensions) -> Arc<Mutex<AccessContext>> {
+    if let Some(context) = extensions.get::<Arc<Mutex<AccessContext>>>().cloned() {
+        context
+    } else {
+        let context = Arc::new(Mutex::new(AccessContext::default()));
+        extensions.insert(context.clone());
+        context
+    }
+}
+
 pub async fn access_log(mut request: Request<Body>, next: Next) -> Response {
+    let context = access_context(request.extensions_mut());
     let method = request.method().as_str().to_owned();
     let route = request
         .extensions()
         .get::<MatchedPath>()
         .map(|matched| matched.as_str().to_owned())
         .unwrap_or_else(|| "/_unmatched".to_owned());
-    let trace_id = request
+    let parent_trace_id = request
         .headers()
         .get("traceparent")
         .and_then(|value| value.to_str().ok())
         .and_then(parse_trace_id);
-    let context = Arc::new(Mutex::new(AccessContext::default()));
-    request.extensions_mut().insert(context.clone());
 
     let started = Instant::now();
     let response = next.run(request).await;
@@ -49,16 +65,20 @@ pub async fn access_log(mut request: Request<Body>, next: Next) -> Response {
         .get("x-request-id")
         .and_then(|value| value.to_str().ok())
         .unwrap_or("-");
+    let context = context.lock().unwrap();
     let wallet_hash = context
-        .lock()
-        .unwrap()
         .wallet_hash
         .clone()
+        .unwrap_or_else(|| "-".to_owned());
+    let trace_id = context
+        .trace_id
+        .clone()
+        .or(parent_trace_id)
         .unwrap_or_else(|| "-".to_owned());
     tracing::info!(
         target: "http_access",
         request_id,
-        trace_id = trace_id.as_deref().unwrap_or("-"),
+        trace_id,
         method,
         route,
         status = response.status().as_u16(),
@@ -223,8 +243,6 @@ fn is_sensitive_field(field: &str) -> bool {
         "authorization",
         "bearer",
         "token",
-        "signature",
-        "sig",
         "nonce",
         "secret",
         "apikey",
@@ -232,6 +250,8 @@ fn is_sensitive_field(field: &str) -> bool {
     ]
     .iter()
     .any(|sensitive| normalized.contains(sensitive))
+        || normalized == "sig"
+        || normalized.contains("signature")
 }
 
 fn redaction_patterns() -> &'static [Regex] {
@@ -243,6 +263,7 @@ fn redaction_patterns() -> &'static [Regex] {
             r"(?i)\b(?:sk|pk|rk|api[_-]?key|gh[pousr]_|xox[baprs]?[-_]|AIza)[A-Za-z0-9_.-]{12,}\b",
             r"\b[A-Fa-f0-9]{24,}\b",
             r"\b[A-Za-z0-9+/]{80,}={0,2}\b",
+            r"\b[A-Za-z0-9_-]{40,}\b",
             r#"(?i)\b(?:signature|sig|nonce|api[_-]?key(?:[_-]?secret)?|secret)\b\s*[:=]\s*["']?[^,\s"']+"#,
         ]
         .into_iter()
@@ -322,5 +343,23 @@ mod tests {
         assert!(!line.contains("super-secret-api-key"));
         assert!(!line.contains("alice@example.com"));
         assert!(!line.contains("feedfeedfeedfeedfeedfeedfeedfeed"));
+    }
+
+    #[test]
+    fn access_context_is_shared_across_request_metadata_updates() {
+        let mut request = Request::builder()
+            .uri("/api/v1/auth/me")
+            .body(Body::empty())
+            .unwrap();
+        let context = access_context(request.extensions_mut());
+        let wallet_address = "GTESTWALLET";
+        let expected_wallet_hash = data_encoding::HEXLOWER.encode(&Sha256::digest(wallet_address));
+
+        set_wallet_identity(request.extensions(), wallet_address);
+        set_trace_id(request.extensions(), "0123456789abcdef0123456789abcdef");
+
+        let context = context.lock().unwrap();
+        assert_eq!(context.wallet_hash.as_deref(), Some(expected_wallet_hash.as_str()));
+        assert_eq!(context.trace_id.as_deref(), Some("0123456789abcdef0123456789abcdef"));
     }
 }

@@ -2,6 +2,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use serde::Deserialize;
+use tracing::Instrument;
 
 use crate::auth::AuthUser;
 use crate::error::{db_error, AppError, AppJson};
@@ -160,7 +161,14 @@ pub async fn check_alerts_loop(state: AppState) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
     loop {
         interval.tick().await;
-        check_once(&state).await;
+        async {
+            check_once(&state).await;
+        }
+        .instrument(tracing::info_span!(
+            "background.job",
+            "job.name" = "alert_checks"
+        ))
+        .await;
     }
 }
 

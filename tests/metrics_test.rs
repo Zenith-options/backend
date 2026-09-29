@@ -5,6 +5,14 @@ use common::TestApp;
 
 #[tokio::test]
 async fn metrics_uses_prometheus_exposition_and_reports_operational_metrics() {
+    use tracing_subscriber::prelude::*;
+
+    let subscriber = tracing_subscriber::registry().with(
+        zenith_backend::metrics::SqlxQueryMetricsLayer::new()
+            .with_filter(tracing_subscriber::filter::LevelFilter::TRACE),
+    );
+    tracing::subscriber::set_global_default(subscriber).unwrap();
+
     let app = TestApp::spawn().await;
     let _ = app.get("/metrics").await;
     let (status, body) = app.get("/metrics").await;
@@ -29,4 +37,12 @@ async fn metrics_uses_prometheus_exposition_and_reports_operational_metrics() {
     ] {
         assert!(exposition.contains(metric), "missing metric {metric}");
     }
+    let query_count = exposition
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("zenith_db_queries_total ")
+                .and_then(|value| value.parse::<u64>().ok())
+        })
+        .expect("query counter should have a Prometheus sample");
+    assert!(query_count > 0, "SQLx query events should be measured");
 }

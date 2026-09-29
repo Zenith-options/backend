@@ -2,6 +2,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::Response;
 use rand::Rng;
+use tracing::Instrument;
 
 use crate::AppState;
 
@@ -39,10 +40,17 @@ pub async fn price_simulator_loop(state: AppState) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
     loop {
         interval.tick().await;
-        tick_once(&state);
-        state
-            .operations
-            .background_loop_succeeded("price_simulator");
+        async {
+            tick_once(&state);
+            state
+                .operations
+                .background_loop_succeeded("price_simulator");
+        }
+        .instrument(tracing::info_span!(
+            "background.job",
+            "job.name" = "price_simulator"
+        ))
+        .await;
     }
 }
 

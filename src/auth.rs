@@ -5,6 +5,7 @@ use data_encoding::BASE64;
 use ed25519_dalek::{Signature, VerifyingKey};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use tracing::Instrument;
 
 use crate::error::{db_error, AppError, AppJson};
 use crate::AppState;
@@ -265,23 +266,30 @@ pub async fn cleanup_expired_loop(state: crate::AppState) {
     loop {
         interval.tick().await;
 
-        match sweep_expired(&state.db).await {
-            Ok((n, s)) if n > 0 || s > 0 => {
-                state.operations.background_loop_succeeded("auth_cleanup");
-                tracing::info!(
-                    expired_nonces = n,
-                    expired_sessions = s,
-                    "swept expired auth rows"
-                );
-            }
-            Ok(_) => state.operations.background_loop_succeeded("auth_cleanup"),
-            Err(e) => {
-                state
-                    .operations
-                    .background_loop_failed("auth_cleanup", e.to_string());
-                tracing::warn!(error = %e, "auth cleanup sweep failed");
+        async {
+            match sweep_expired(&state.db).await {
+                Ok((n, s)) if n > 0 || s > 0 => {
+                    state.operations.background_loop_succeeded("auth_cleanup");
+                    tracing::info!(
+                        expired_nonces = n,
+                        expired_sessions = s,
+                        "swept expired auth rows"
+                    );
+                }
+                Ok(_) => state.operations.background_loop_succeeded("auth_cleanup"),
+                Err(e) => {
+                    state
+                        .operations
+                        .background_loop_failed("auth_cleanup", e.to_string());
+                    tracing::warn!(error = %e, "auth cleanup sweep failed");
+                }
             }
         }
+        .instrument(tracing::info_span!(
+            "background.job",
+            "job.name" = "auth_cleanup"
+        ))
+        .await;
     }
 }
 

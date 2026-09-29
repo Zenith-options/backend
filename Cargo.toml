@@ -24,6 +24,10 @@ rand = "0.8"
 tower_governor = "0.4"
 regex = "1.13.1"
 sha2 = "0.11.0"
+opentelemetry = { version = "0.33.0", features = ["trace"], default-features = false }
+opentelemetry_sdk = { version = "0.33.0", features = ["rt-tokio", "trace"], default-features = false }
+opentelemetry-otlp = { version = "0.33.0", features = ["trace", "grpc-tonic"], default-features = false }
+tracing-opentelemetry = { version = "0.34.0", default-features = false }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

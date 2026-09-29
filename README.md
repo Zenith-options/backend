@@ -103,6 +103,12 @@ request ID, and trace ID fields. Sensitive field names and recognizable
 bearer tokens, signatures, nonces, API keys, and emails are redacted.
 Each request also emits one access event with route, status, latency, and
 a SHA-256 wallet hash when authenticated.
+Inbound W3C `traceparent` contexts are extracted and outgoing requests can
+use `telemetry::inject_current_trace_context` to propagate them. Set
+`OTEL_EXPORTER_OTLP_ENDPOINT` (gRPC, default port 4317) to enable OTLP
+export; `OTEL_SERVICE_NAME` overrides the service name. The current app
+has no outbound RPC, Horizon, webhook, or external price-feed clients to
+instrument yet.
 
 ## Architecture
 
