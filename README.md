@@ -7,10 +7,11 @@ a live spot-price WebSocket feed.
 
 ## Status
 
-Market data (spot prices, vol surface) is in-memory and nudged by a
-background simulator — there's no real price feed or on-chain
-integration yet. Everything else (accounts, positions, watchlist, alerts, notifications
-and webhooks) persists to a SQLite file via sqlx. This is a paper-trading
+Market data (spot prices, vol surface) is cached in-process from shared
+SQLite state and nudged by the worker's simulator — there's no real price
+feed or on-chain integration yet. Everything else (accounts, positions,
+watchlist, alerts, notifications and webhooks) persists to SQLite via sqlx.
+This is a paper-trading
 backend for the frontend to build against, not a production trading
 system.
 
@@ -18,12 +19,23 @@ system.
 
 ```bash
 cp .env.example .env   # DATABASE_URL=sqlite://zenith.db, or leave unset for the same default
-cargo run
+cargo run --bin zenith-backend
 # listening on 0.0.0.0:8081
 ```
 
+Run the background processor separately against the same database:
+
 ```bash
-cargo test              # 11 unit tests + 29 integration tests
+cargo run --bin zenith-worker
+```
+
+Only the worker claims scheduled jobs; API instances only refresh shared
+market state and feature-flag caches. Both binaries run migrations and
+share the library crate. For multiple processes, configure `DATABASE_URL`
+to the same SQLite database on storage that supports SQLite locking.
+
+```bash
+cargo test
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
@@ -54,6 +66,7 @@ All `/api/v1/*` endpoints marked **auth** require an
 | `GET /api/v1/chain` | Full option chain (calls+puts) across strikes for one expiry |
 | `GET /api/v1/expiries/:underlying` | Available expiries for an underlying |
 | `GET /api/v1/stats` | Protocol-wide stats (mocked, not derived from real trades) |
+| `GET /api/v1/features` | Environment-scoped feature flags evaluated for the optional bearer-session wallet |
 | `GET /api/v1/ws/spot` | WebSocket: snapshot on connect, then a live tick every ~2s |
 | `POST /api/graphql` | Read-only market and authenticated portfolio GraphQL API; depth 12 and complexity 1000 limits |
 | `POST /api/v1/portfolio/payoff` | Combined P&L curve for a set of caller-supplied legs (no auth — legs carry their own premium) |
@@ -105,7 +118,9 @@ enabled.
 | `GET` / `POST /api/v1/alerts` | List / create a spot, percent-change, IV, position/strategy P&L, portfolio-delta or expiry alert |
 | `DELETE /api/v1/alerts/:id` | Remove an alert |
 
-Alerts are evaluated every 10s. Conditions are `above`/`below`,
+Alerts are checked against spot every 10s by a persistent background job;
+a triggered alert stays in the table (visible via GET) rather than being
+deleted. Conditions are `above`/`below`,
 `percent_change_above`/`percent_change_below` (requires `window_seconds`),
 `iv_above`/`iv_below` (requires `strike`, `expiry_days`, `option_type`),
 `position_pnl_above`/`position_pnl_below` (requires `position_id`),
@@ -125,16 +140,16 @@ visible through GET.
 | Endpoint | What it does |
 |---|---|
 | `GET` / `POST /api/v1/delivery/channels` | List channels / begin verified email, Telegram, or Discord opt-in |
-| `POST /api/v1/delivery/channels/:id/verify` | Verify the code sent to the channel |
-| `DELETE /api/v1/delivery/channels/:id` | Unlink a channel |
+| `POST` /api/v1/delivery/channels/:id/verify` | Verify the code sent to the channel |
+| `DELETE` /api/v1/delivery/channels/:id` | Unlink a channel |
 | `GET` / `POST /api/v1/delivery/webhooks` | List / register event webhooks; registration returns the secret once |
-| `DELETE /api/v1/delivery/webhooks/:id` | Remove a webhook |
-| `POST /api/v1/delivery/api-keys` | Create a wallet-scoped API key (shown once) |
-| `DELETE /api/v1/delivery/api-keys/:id` | Revoke a wallet-owned API key |
-| `POST /api/v1/delivery/api/webhooks` | Register a webhook using `X-API-Key` instead of a wallet session |
-| `GET /api/v1/delivery/logs` | List recent wallet delivery attempts |
-| `POST /api/v1/delivery/logs/:id/replay` | Replay a logged wallet delivery |
-| `POST /api/v1/delivery/api/logs/:id/replay` | Replay using `X-API-Key` |
+| `DELETE` /api/v1/delivery/webhooks/:id` | Remove a webhook |
+| `POST` /api/v1/delivery/api-keys` | Create a wallet-scoped API key (shown once) |
+| `DELETE` /api/v1/delivery/api-keys/:id` | Revoke a wallet-owned API key |
+| `POST` /api/v1/delivery/api/webhooks` | Register a webhook using `X-API-Key` instead of a wallet session |
+| `GET` /api/v1/delivery/logs` | List recent wallet delivery attempts |
+| `POST` /api/v1/delivery/logs/:id/replay` | Replay a logged wallet delivery |
+| `POST` /api/v1/delivery/api/logs/:id/replay` | Replay using `X-API-Key` |
 
 Webhook event types are `alert_triggered`, `position_settled`,
 `position_liquidated`, and `order_filled`. Requests include a Unix timestamp
@@ -146,6 +161,36 @@ redirects. Alerts and position open/settle events enqueue notifications;
 the delivery service also accepts margin-call and liquidation events from
 trusted internal producers.
 
+### Administration **auth**
+
+Admin access is granted to wallet addresses with the roles `viewer`,
+`operator`, `risk_admin`, or `super_admin` (higher roles inherit lower
+role capabilities). Set `ZENITH_SUPER_ADMIN_WALLETS` to a comma-separated
+list of initial super-admin wallets. Admin reads require the viewer role;
+mutations require an appropriate role and a wallet-signature step-up
+challenge, valid for ten minutes.
+
+| Endpoint | What it does |
+|---|---|
+| `POST /api/v1/admin/auth/step-up/nonce` and `/verify` | Re-authenticate the session wallet with a fresh signature |
+| `GET /api/v1/admin/features`, `PUT` / `DELETE /:name` | View and manage environment-scoped feature flags |
+| `GET` / `POST /api/v1/admin/series`, `DELETE /:id` | Manage configured option series |
+| `GET` / `PUT /api/v1/admin/circuit-breakers/:name` | Inspect or trip/reset the trading circuit breaker |
+| `GET /api/v1/admin/users/:wallet` | Look up account creation and assigned admin roles |
+| `POST /api/v1/admin/users/:wallet/roles`, `DELETE /roles/:role` | Grant/revoke roles (super_admin only) |
+| `GET` / `POST /api/v1/admin/jobs` | View queued work or enqueue supported job kinds |
+| `GET /api/v1/admin/jobs/metrics`, `POST /:id/retry` | Inspect job metrics or retry a dead-lettered job |
+| `GET /api/v1/admin/jobs/:id/artifact` | Retrieve a persisted export artifact |
+| `GET` / `POST /api/v1/admin/reconciliation` | View reports or enqueue a risk-admin reconciliation |
+
+The `trading` circuit breaker pauses new position and strategy opens;
+closing existing positions remains available. The persistent job queue
+uses SQLite leases for cross-process claims, exponential retry backoff,
+timeouts, dead-letter state, and per-attempt metrics. It schedules auth
+cleanup, alert checks, price ticks, market snapshots, retention, and daily
+JSON exports; exports and reconciliation reports are retained in SQLite.
+Set `ZENITH_RETENTION_DAYS` (default `90`) to control snapshot retention.
+
 Every response carries an `x-request-id` header — a fresh UUIDv4 if the
 request didn't already have one, or the caller's own value echoed back
 unchanged otherwise — for tracing a single request through logs.
@@ -155,11 +200,15 @@ unchanged otherwise — for tracing a single request through logs.
 ```
 src/
 ├── main.rs          # Thin entrypoint: init_tracing -> init_state -> build_router -> serve
+├── worker.rs        # Dedicated zenith-worker entrypoint for persistent background jobs
 ├── lib.rs           # Pricing engine, AppState, request/response types, route wiring
 ├── db.rs            # SQLite pool + migration runner
 ├── models.rs        # Row structs (Account, Position, WatchlistItem, Alert)
 ├── error.rs         # AppError: JSON {"error": "..."} instead of empty-body status codes
-├── auth.rs          # Sign-in-with-wallet: nonce, verify, AuthUser extractor, session cleanup
+├── auth.rs          # Sign-in-with-wallet: nonce, verify, AuthUser extractor, expiry sweep
+├── admin.rs         # Wallet roles, step-up sessions, feature/series/breaker administration
+├── features.rs      # Environment-scoped DB flags and local rollout cache
+├── jobs.rs          # Durable job queue, retries, metrics, snapshots, exports, reconciliation
 ├── strkey.rs         # Stellar G... address <-> raw ed25519 pubkey codec
 ├── collateral.rs    # Collateral rules for writing options (100% calls, 110% puts)
 ├── payoff.rs         # Combined multi-leg P&L math (ported from the frontend's lib/payoff.ts)
@@ -167,7 +216,7 @@ src/
 ├── strategies.rs     # Multi-leg atomic execution, built on positions.rs's tx helpers
 ├── history.rs         # Closed/rolled positions + stats
 ├── request_id.rs      # UUIDv4 generator for the x-request-id middleware
-├── watchlist.rs, alerts.rs, prices.rs  # Per-domain CRUD + background loops
+├── watchlist.rs, alerts.rs, prices.rs  # Per-domain CRUD + worker task logic
 migrations/           # One file per schema change, embedded into the binary at compile time
 tests/
 ├── common/mod.rs     # TestApp: real router over a throwaway temp-file DB, via tower::oneshot
@@ -178,6 +227,13 @@ tests/
 `zenith_backend` library crate, which is what lets `tests/*_test.rs`
 exercise the real router without a bin-only crate's usual restriction
 (a `tests/` directory can only see a *library* crate's public items).
+
+Feature flags are stored in SQLite and refreshed into each API process's
+in-memory cache every five seconds. Set `ZENITH_ENV` to select the
+environment (defaults to `development`); flags and their wallet allowlists
+are isolated by that value. Boolean enablement is combined with a stable
+wallet-based percentage rollout, and unknown flags are disabled. An
+unauthenticated client is evaluated as the shared `anonymous` subject.
 
 ### A note on the pricing model
 
@@ -235,3 +291,4 @@ rather than just assumed from reading the SQL.
 ## License
 
 MIT © Zenith Protocol Contributors
+
