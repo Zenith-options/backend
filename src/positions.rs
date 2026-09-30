@@ -1,7 +1,10 @@
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Json;
+use base64::Engine;
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use sqlx::{Sqlite, Transaction};
 
 use crate::auth::AuthUser;
@@ -22,19 +25,74 @@ pub(crate) fn margin_model() -> Box<dyn MarginModel> {
     }
 }
 
+/// Default starting balance for a fresh paper account / epoch.
+pub const DEFAULT_STARTING_BALANCE: f64 = 100_000.0;
+
+/// Returns the wallet's current (open) epoch id, creating the account and
+/// its first epoch lazily if they don't exist yet. This keeps the old
+/// "lazily created account" behaviour while giving every account an
+/// explicit epoch to scope history, stats and leaderboards against.
+pub(crate) async fn ensure_current_epoch(
+    tx: &mut Transaction<'_, Sqlite>,
+    wallet_address: &str,
+) -> Result<i64, AppError> {
+    sqlx::query(
+        "INSERT INTO accounts (wallet_address) VALUES (?) ON CONFLICT(wallet_address) DO NOTHING",
+    )
+    .bind(wallet_address)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| db_error("create or confirm account", e))?;
+
+    let existing: Option<i64> = sqlx::query_scalar(
+        "SELECT current_epoch_id FROM accounts WHERE wallet_address = ?",
+    )
+    .bind(wallet_address)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|e| db_error("load account epoch", e))?;
+
+    if let Some(epoch_id) = existing {
+        return Ok(epoch_id);
+    }
+
+    let epoch_id: i64 = sqlx::query_scalar(
+        "INSERT INTO account_epochs (wallet_address, starting_balance)
+         VALUES (?, ?) RETURNING id",
+    )
+    .bind(wallet_address)
+    .bind(DEFAULT_STARTING_BALANCE)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|e| db_error("create account epoch", e))?;
+
+    sqlx::query("UPDATE accounts SET current_epoch_id = ? WHERE wallet_address = ?")
+        .bind(epoch_id)
+        .bind(wallet_address)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| db_error("set current epoch", e))?;
+
+    Ok(epoch_id)
+}
+}
+
 pub async fn get_account(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
 ) -> Result<Json<Account>, AppError> {
     // Verify/login already creates this row, but stay defensive in case a
-    // session outlives some future account-deletion path.
-    sqlx::query(
-        "INSERT INTO accounts (wallet_address) VALUES (?) ON CONFLICT(wallet_address) DO NOTHING",
-    )
-    .bind(&wallet_address)
-    .execute(&state.db)
-    .await
-    .map_err(|e| db_error("create or confirm account", e))?;
+    // session outlives some future account-deletion path. We also make
+    // sure the account has a current epoch so history/stats scoping works.
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| db_error("begin account tx", e))?;
+    ensure_current_epoch(&mut tx, &wallet_address).await?;
+    tx.commit()
+        .await
+        .map_err(|e| db_error("commit account tx", e))?;
 
     let account: Account = sqlx::query_as("SELECT * FROM accounts WHERE wallet_address = ?")
         .bind(&wallet_address)
@@ -48,6 +106,67 @@ pub async fn get_account(
 pub const DEFAULT_LIST_LIMIT: i64 = 50;
 pub const MAX_LIST_LIMIT: i64 = 200;
 
+/// Opaque, HMAC-signed keyset cursor. Encodes the `(sort_key, id)` pair
+/// that the next page should resume after, plus a fingerprint of the
+/// filter set it was minted under so a cursor can't be replayed against a
+/// different query. base64url-encoded so it's safe in a query string.
+#[derive(Serialize, Deserialize)]
+struct CursorPayload {
+    /// `opened_at` of the last row on the previous page.
+    sort_key: String,
+    /// Tiebreaker id of the last row on the previous page.
+    id: String,
+    /// Fingerprint of the filters this cursor was issued for.
+    filters: String,
+}
+
+fn cursor_secret(state: &AppState) -> &[u8] {
+    state.cursor_secret.as_bytes()
+}
+
+fn filters_fingerprint(status: Option<&str>, strategy_id: Option<&str>) -> String {
+    format!(
+        "status={};strategy_id={}",
+        status.unwrap_or(""),
+        strategy_id.unwrap_or("")
+    )
+}
+
+fn encode_cursor(state: &AppState, payload: &CursorPayload) -> Result<String, AppError> {
+    let json = serde_json::to_vec(payload)
+        .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(cursor_secret(state))
+        .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    mac.update(&json);
+    let sig = mac.finalize().into_bytes();
+    let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    Ok(format!(
+        "{}.{}",
+        engine.encode(&json),
+        engine.encode(sig)
+    ))
+}
+
+fn decode_cursor(state: &AppState, token: &str) -> Result<CursorPayload, AppError> {
+    let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let (body, sig) = token.split_once('.').ok_or_else(|| {
+        AppError::new(StatusCode::BAD_REQUEST, "malformed cursor")
+    })?;
+    let json = engine
+        .decode(body)
+        .map_err(|_| AppError::new(StatusCode::BAD_REQUEST, "malformed cursor"))?;
+    let sig = engine
+        .decode(sig)
+        .map_err(|_| AppError::new(StatusCode::BAD_REQUEST, "malformed cursor"))?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(cursor_secret(state))
+        .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    mac.update(&json);
+    mac.verify_slice(&sig)
+        .map_err(|_| AppError::new(StatusCode::BAD_REQUEST, "invalid cursor signature"))?;
+    serde_json::from_slice(&json)
+        .map_err(|_| AppError::new(StatusCode::BAD_REQUEST, "malformed cursor"))
+}
+
 #[derive(Deserialize)]
 pub struct ListPositionsQuery {
     /// "open" | "closed" | "rolled" — omit to return every status.
@@ -57,7 +176,13 @@ pub struct ListPositionsQuery {
     /// Defaults to DEFAULT_LIST_LIMIT, capped at MAX_LIST_LIMIT regardless
     /// of what the caller asks for.
     pub limit: Option<i64>,
+    /// Deprecated offset fallback, kept for one release.
     pub offset: Option<i64>,
+    /// Opaque keyset cursor from a previous page's `next_cursor`.
+    pub cursor: Option<String>,
+    /// "current" (default) scopes to the account's current epoch;
+    /// "all" includes every prior epoch's history.
+    pub epoch: Option<String>,
 }
 
 /// Response shape is still a bare JSON array (unchanged, since the
@@ -75,7 +200,92 @@ pub async fn list_positions(
         .limit
         .unwrap_or(DEFAULT_LIST_LIMIT)
         .clamp(1, MAX_LIST_LIMIT);
+
+    // Keyset path: resume strictly after the `(opened_at, id)` pair the
+    // cursor encodes. Fetch one extra row to know whether a next page
+    // exists without a COUNT.
+    if let Some(token) = q.cursor.as_deref() {
+        let payload = decode_cursor(&state, token)?;
+        let expected = filters_fingerprint(q.status.as_deref(), q.strategy_id.as_deref());
+        if payload.filters != expected {
+            return Err(AppError::new(
+                StatusCode::BAD_REQUEST,
+                "cursor does not match the current filters",
+            ));
+        }
+
+        let mut rows: Vec<Position> = sqlx::query_as(
+            "SELECT * FROM positions
+                WHERE wallet_address = ?
+                  AND (? IS NULL OR status = ?)
+                  AND (? IS NULL OR strategy_id = ?)
+                  AND (opened_at < ? OR (opened_at = ? AND id < ?))
+             ORDER BY opened_at DESC, id DESC
+             LIMIT ?",
+        )
+        .bind(&wallet_address)
+        .bind(&q.status)
+        .bind(&q.status)
+        .bind(&q.strategy_id)
+        .bind(&q.strategy_id)
+        .bind(&payload.sort_key)
+        .bind(&payload.sort_key)
+        .bind(&payload.id)
+        .bind(limit + 1)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| db_error("list positions", e))?;
+
+        let has_more = rows.len() as i64 > limit;
+        if has_more {
+            rows.truncate(limit as usize);
+        }
+        let next_cursor = if has_more {
+            rows.last().map(|p| {
+                encode_cursor(
+                    &state,
+                    &CursorPayload {
+                        sort_key: p.opened_at.clone(),
+                        id: p.id.clone(),
+                        filters: expected,
+                    },
+                )
+            })
+            .transpose()?
+        } else {
+            None
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-has-more",
+            HeaderValue::from_static(if has_more { "true" } else { "false" }),
+        );
+        if let Some(c) = next_cursor {
+            if let Ok(v) = HeaderValue::from_str(&c) {
+                headers.insert("x-next-cursor", v);
+            }
+        }
+
+        return Ok((headers, Json(rows)));
+    }
+
+    // Deprecated offset fallback (kept for one release).
     let offset = q.offset.unwrap_or(0).max(0);
+
+    // `?epoch=all` includes every epoch; anything else (including the
+    // default) scopes to the account's current epoch. A NULL epoch_id
+    // (legacy rows) is treated as belonging to the current epoch so old
+    // data isn't silently hidden.
+    let include_all = matches!(q.epoch.as_deref(), Some("all"));
+    let current_epoch: Option<i64> = sqlx::query_scalar(
+        "SELECT current_epoch_id FROM accounts WHERE wallet_address = ?",
+    )
+    .bind(&wallet_address)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| db_error("load current epoch", e))?
+    .flatten();
 
     // `? IS NULL OR column = ?` lets one query handle all four
     // status/strategy_id filter combinations without branching SQL.
@@ -84,7 +294,8 @@ pub async fn list_positions(
             WHERE wallet_address = ?
               AND (? IS NULL OR status = ?)
               AND (? IS NULL OR strategy_id = ?)
-         ORDER BY opened_at DESC
+              AND (? = 1 OR epoch_id IS NULL OR epoch_id = ?)
+         ORDER BY opened_at DESC, id DESC
          LIMIT ? OFFSET ?",
     )
     .bind(&wallet_address)
@@ -92,6 +303,8 @@ pub async fn list_positions(
     .bind(&q.status)
     .bind(&q.strategy_id)
     .bind(&q.strategy_id)
+    .bind(include_all)
+    .bind(current_epoch)
     .bind(limit)
     .bind(offset)
     .fetch_all(&state.db)
@@ -102,13 +315,16 @@ pub async fn list_positions(
         "SELECT COUNT(*) FROM positions
             WHERE wallet_address = ?
               AND (? IS NULL OR status = ?)
-              AND (? IS NULL OR strategy_id = ?)",
+              AND (? IS NULL OR strategy_id = ?)
+              AND (? = 1 OR epoch_id IS NULL OR epoch_id = ?)",
     )
     .bind(&wallet_address)
     .bind(&q.status)
     .bind(&q.status)
     .bind(&q.strategy_id)
     .bind(&q.strategy_id)
+    .bind(include_all)
+    .bind(current_epoch)
     .fetch_one(&state.db)
     .await
     .map_err(|e| db_error("count positions", e))?;
@@ -224,11 +440,16 @@ pub(crate) async fn open_position_in_tx(
         -entry_premium * req.contracts // premium paid
     };
 
+    // Serialise on the account row so a reset can't interleave with an
+    // in-flight fill: the reset takes the same row lock before closing
+    // positions and starting a new epoch.
     let account: Account = sqlx::query_as("SELECT * FROM accounts WHERE wallet_address = ?")
         .bind(wallet_address)
         .fetch_one(&mut **tx)
         .await
         .map_err(|e| db_error("load account", e))?;
+
+    let epoch_id = ensure_current_epoch(tx, wallet_address).await?;
 
     // Build the post-trade position set (existing open legs plus the leg
     // about to be inserted) and run the portfolio margin engine over it.
@@ -276,8 +497,8 @@ pub(crate) async fn open_position_in_tx(
     sqlx::query(
         "INSERT INTO positions
             (id, wallet_address, underlying, strike, expiry_days, option_type,
-             position_type, contracts, entry_premium, entry_spot, collateral, status, strategy_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)",
+             position_type, contracts, entry_premium, entry_spot, collateral, status, strategy_id, epoch_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)",
     )
     .bind(&id)
     .bind(wallet_address)
@@ -291,6 +512,7 @@ pub(crate) async fn open_position_in_tx(
     .bind(spot)
     .bind(requirement.contribution_for(&id))
     .bind(strategy_id)
+    .bind(epoch_id)
     .execute(&mut **tx)
     .await
     .map_err(|e| db_error("insert position", e))?;
@@ -357,3 +579,4 @@ pub async fn get_margin(
 
     Ok(Json(portfolio_requirement(&positions)))
 }
+
