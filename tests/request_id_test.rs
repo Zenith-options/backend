@@ -41,3 +41,22 @@ async fn two_separate_requests_get_different_ids() {
     let id2 = headers2.get("x-request-id").unwrap().to_str().unwrap();
     assert_ne!(id1, id2);
 }
+
+#[tokio::test]
+async fn structured_v1_compatibility_error_carries_the_response_request_id() {
+    let app = TestApp::spawn().await;
+    let (status, headers, body) = app
+        .get_raw(
+            "/api/v1/price?underlying=UNKNOWN&strike=1&expiry_days=1&option_type=call",
+            None,
+            Some(("x-api-error-format", "structured")),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let response_id = headers.get("x-request-id").unwrap().to_str().unwrap();
+    assert_eq!(body["error"]["code"], "NOT_FOUND");
+    assert_eq!(body["error"]["message"], "Not Found");
+    assert_eq!(body["error"]["details"], serde_json::json!({}));
+    assert_eq!(body["error"]["request_id"], response_id);
+}
