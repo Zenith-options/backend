@@ -10,11 +10,17 @@ use crate::models::Position;
 use crate::positions::{
     close_position_in_tx, current_bs_result, open_position_in_tx, OpenPositionRequest,
 };
+use crate::quotes::{consume_quote_in_tx, QuoteRequest};
 use crate::AppState;
 
 #[derive(Deserialize)]
 pub struct ExecuteStrategyRequest {
     pub legs: Vec<OpenPositionRequest>,
+    /// Optional time-bound executable quote (see POST /api/v1/quotes).
+    /// When present and valid, every leg executes at exactly the quoted
+    /// premium; when absent, today's live-pricing behaviour is kept.
+    #[serde(default)]
+    pub quote_id: Option<String>,
 }
 
 /// Opens every leg of a multi-leg strategy (straddle, spread, iron
@@ -48,10 +54,35 @@ pub async fn execute_strategy(
         .await
         .map_err(|e| db_error("begin strategy transaction", e))?;
 
+    // Validate + consume the quote (if any) inside the same transaction
+    // that opens the legs, so a replay or a mid-flight expiry can't slip
+    // a stale price through. The quote is bound to the wallet, legs,
+    // size and side it was issued for.
+    let quoted_premiums = match &req.quote_id {
+        Some(quote_id) => {
+            let quote_req = QuoteRequest {
+                legs: req.legs.clone(),
+            };
+            Some(
+                consume_quote_in_tx(&mut tx, &state, &wallet_address, quote_id, &quote_req)
+                    .await?,
+            )
+        }
+        None => None,
+    };
+
     let mut opened = Vec::with_capacity(req.legs.len());
-    for leg in &req.legs {
-        let position =
-            open_position_in_tx(&mut tx, &state, &wallet_address, leg, Some(&strategy_id)).await?;
+    for (i, leg) in req.legs.iter().enumerate() {
+        let quoted_premium = quoted_premiums.as_ref().map(|p| p[i]);
+        let position = open_position_in_tx(
+            &mut tx,
+            &state,
+            &wallet_address,
+            leg,
+            Some(&strategy_id),
+            quoted_premium,
+        )
+        .await?;
         opened.push(position);
     }
 
