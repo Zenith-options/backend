@@ -1,445 +1,243 @@
-//! Production-grade internal Soroban RPC client.
-//!
-//! Wraps the JSON-RPC 2.0 methods exposed by Stellar's Soroban RPC
-//! (`getHealth`, `getLatestLedger`, `getLedgerEntries`, `getEvents`,
-//! `simulateTransaction`, `sendTransaction`, `getTransaction`) with typed
-//! request/response structs, exponential-backoff retries, endpoint failover
-//! and per-method latency/error metrics.
-//!
-//! Retries are only applied to idempotent reads and transient errors.
-//! `sendTransaction` is never blindly retried: the caller is responsible for
-//! resubmission by transaction hash.
-
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use thiserror::Error;
-use tokio::sync::RwLock;
-
-/// Default number of ledgers an endpoint may lag behind the best known
-/// ledger before it is considered unhealthy.
-pub const DEFAULT_MAX_LEDGER_LAG: u32 = 5;
-
-/// Default per-request timeout.
-pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// Default number of attempts (initial try + retries) for idempotent reads.
-pub const DEFAULT_MAX_ATTEMPTS: u32 = 3;
-
-/// Base delay used for exponential backoff between retries.
-pub const DEFAULT_BACKOFF_BASE: Duration = Duration::from_millis(200);
-
-/// Typed errors produced by the Soroban RPC client.
-#[derive(Debug, Error)]
-pub enum RpcError {
-    /// The underlying HTTP transport failed (connection, timeout, ...).
-    #[error("rpc transport error: {0}")]
-    Transport(String),
-
-    /// The endpoint responded with HTTP 429 or an equivalent rate-limit signal.
-    #[error("rpc rate limited: {0}")]
-    RateLimited(String),
-
-    /// The endpoint is behind the best known ledger by more than the allowed lag.
-    #[error("rpc node behind: endpoint ledger {endpoint_ledger}, best known {best_ledger}")]
-    NodeBehind {
-        endpoint_ledger: u32,
-        best_ledger: u32,
-    },
-
-    /// The endpoint returned a JSON-RPC 2.0 error object.
-    #[error("json-rpc error {code}: {message}")]
-    JsonRpc { code: i64, message: String },
-
-    /// The response body could not be decoded into the expected type.
-    #[error("rpc decode error: {0}")]
-    Decode(String),
-
-    /// No healthy endpoint was available to serve the request.
-    #[error("no healthy rpc endpoint available")]
-    NoHealthyEndpoint,
-}
-
-impl RpcError {
-    /// Whether the error is transient and the request may be retried.
-    ///
-    /// Only transport failures, rate limiting and node-behind conditions are
-    /// considered transient. JSON-RPC errors and decode errors are terminal.
-    pub fn is_transient(&self) -> bool {
-        matches!(
-            self,
-            RpcError::Transport(_) | RpcError::RateLimited(_) | RpcError::NodeBehind { .. }
-        )
-    }
-}
-
-/// JSON-RPC 2.0 request envelope.
-#[derive(Debug, Serialize)]
-pub struct JsonRpcRequest<'a> {
-    pub jsonrpc: &'a str,
-    pub id: u64,
-    pub method: &'a str,
-    pub params: Value,
-}
-
-impl<'a> JsonRpcRequest<'a> {
-    pub fn new(id: u64, method: &'a str, params: Value) -> Self {
+impl RpcClient {
+    /// Create a client for the given RPC endpoint URL.
+    pub fn new(endpoint: impl Into<String>) -> Self {
         Self {
-            jsonrpc: "2.0",
-            id,
-            method,
-            params,
+            endpoint: endpoint.into(),
+            http: reqwest::Client::new(),
         }
     }
-}
 
-/// JSON-RPC 2.0 response envelope.
-#[derive(Debug, Deserialize)]
-pub struct JsonRpcResponse {
-    pub id: Option<u64>,
-    pub result: Option<Value>,
-    pub error: Option<JsonRpcErrorObject>,
-}
+    /// Fetch the account's current sequence number live from the network.
+    pub async fn get_account(&self, account_id: &str) -> Result<AccountInfo, RpcError> {
+        let params = json!({ "accountId": account_id });
+        let result = self.call("getAccount", params).await?;
 
-/// JSON-RPC 2.0 error object.
-#[derive(Debug, Deserialize)]
-pub struct JsonRpcErrorObject {
-    pub code: i64,
-    pub message: String,
-    #[serde(default)]
-    pub data: Option<Value>,
-}
+        let sequence = result
+            .get("sequence")
+            .and_then(Value::as_str)
+            .ok_or_else(|| RpcError::AccountNotFound(account_id.to_string()))?;
 
-/// Result of `getHealth`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct HealthResponse {
-    pub status: String,
-    #[serde(default)]
-    pub latest_ledger: Option<u32>,
-    #[serde(default)]
-    pub oldest_ledger: Option<u32>,
-}
-
-/// Result of `getLatestLedger`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct LatestLedgerResponse {
-    pub id: String,
-    pub sequence: u32,
-    #[serde(default)]
-    pub protocol_version: Option<u32>,
-}
-
-/// A single ledger entry key/value pair.
-#[derive(Debug, Clone, Deserialize)]
-pub struct LedgerEntry {
-    pub key: String,
-    pub xdr: String,
-    #[serde(default)]
-    pub last_modified_ledger_seq: Option<u32>,
-    #[serde(default)]
-    pub live_until_ledger_seq: Option<u32>,
-}
-
-/// Result of `getLedgerEntries`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct LedgerEntriesResponse {
-    #[serde(default)]
-    pub entries: Vec<LedgerEntry>,
-    #[serde(default)]
-    pub latest_ledger: Option<u32>,
-}
-
-/// A single contract event.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ContractEvent {
-    #[serde(rename = "type")]
-    pub event_type: String,
-    pub ledger: u32,
-    #[serde(default)]
-    pub ledger_closed_at: Option<String>,
-    pub contract_id: String,
-    #[serde(default)]
-    pub topic: Vec<String>,
-    #[serde(default)]
-    pub value: Option<String>,
-    #[serde(default)]
-    pub tx_hash: Option<String>,
-}
-
-/// Result of `getEvents`, including the pagination cursor.
-#[derive(Debug, Clone, Deserialize)]
-pub struct EventsResponse {
-    #[serde(default)]
-    pub events: Vec<ContractEvent>,
-    #[serde(default)]
-    pub latest_ledger: Option<u32>,
-    #[serde(default)]
-    pub cursor: Option<String>,
-}
-
-/// Result of `simulateTransaction`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct SimulateTransactionResponse {
-    #[serde(default)]
-    pub transaction_data: Option<String>,
-    #[serde(default)]
-    pub min_resource_fee: Option<String>,
-    #[serde(default)]
-    pub results: Vec<Value>,
-    #[serde(default)]
-    pub error: Option<String>,
-    #[serde(default)]
-    pub latest_ledger: Option<u32>,
-}
-
-/// Result of `sendTransaction`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct SendTransactionResponse {
-    pub status: String,
-    pub hash: String,
-    #[serde(default)]
-    pub latest_ledger: Option<u32>,
-    #[serde(default)]
-    pub error_result_xdr: Option<String>,
-}
-
-/// Result of `getTransaction`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct GetTransactionResponse {
-    pub status: String,
-    #[serde(default)]
-    pub ledger: Option<u32>,
-    #[serde(default)]
-    pub envelope_xdr: Option<String>,
-    #[serde(default)]
-    pub result_xdr: Option<String>,
-    #[serde(default)]
-    pub result_meta_xdr: Option<String>,
-}
-
-/// Per-method latency and error metrics.
-#[derive(Debug, Default)]
-pub struct MethodMetrics {
-    pub calls: AtomicU64,
-    pub errors: AtomicU64,
-    pub total_latency_micros: AtomicU64,
-}
-
-impl MethodMetrics {
-    fn record(&self, latency: Duration, failed: bool) {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        if failed {
-            self.errors.fetch_add(1, Ordering::Relaxed);
-        }
-        self.total_latency_micros
-            .fetch_add(latency.as_micros() as u64, Ordering::Relaxed);
-    }
-
-    /// Average latency in milliseconds, or `None` if the method was never called.
-    pub fn avg_latency_ms(&self) -> Option<f64> {
-        let calls = self.calls.load(Ordering::Relaxed);
-        if calls == 0 {
-            return None;
-        }
-        let total = self.total_latency_micros.load(Ordering::Relaxed);
-        Some((total as f64 / calls as f64) / 1000.0)
-    }
-}
-
-/// Aggregated metrics for all RPC methods.
-#[derive(Debug, Default)]
-pub struct RpcMetrics {
-    pub methods: HashMap<&'static str, MethodMetrics>,
-}
-
-impl RpcMetrics {
-    fn new() -> Self {
-        let mut methods = HashMap::new();
-        for name in [
-            "getHealth",
-            "getLatestLedger",
-            "getLedgerEntries",
-            "getEvents",
-            "simulateTransaction",
-            "sendTransaction",
-            "getTransaction",
-        ] {
-            methods.insert(name, MethodMetrics::default());
-        }
-        Self { methods }
-    }
-
-    fn record(&self, method: &str, latency: Duration, failed: bool) {
-        if let Some(m) = self.methods.get(method) {
-            m.record(latency, failed);
-        }
-    }
-}
-
-/// Health state of a single endpoint.
-#[derive(Debug, Clone)]
-struct EndpointState {
-    url: String,
-    healthy: bool,
-    last_ledger: Option<u32>,
-}
-
-/// Configuration for the Soroban RPC client.
-#[derive(Debug, Clone)]
-pub struct SorobanRpcConfig {
-    pub endpoints: Vec<String>,
-    pub max_ledger_lag: u32,
-    pub request_timeout: Duration,
-    pub max_attempts: u32,
-    pub backoff_base: Duration,
-}
-
-impl SorobanRpcConfig {
-    pub fn new(endpoints: Vec<String>) -> Self {
-        Self {
-            endpoints,
-            max_ledger_lag: DEFAULT_MAX_LEDGER_LAG,
-            request_timeout: DEFAULT_REQUEST_TIMEOUT,
-            max_attempts: DEFAULT_MAX_ATTEMPTS,
-            backoff_base: DEFAULT_BACKOFF_BASE,
-        }
-    }
-}
-
-/// Abstraction over the Soroban RPC so tests can substitute a mock.
-#[async_trait::async_trait]
-pub trait SorobanRpc: Send + Sync {
-    async fn get_health(&self) -> Result<HealthResponse, RpcError>;
-    async fn get_latest_ledger(&self) -> Result<LatestLedgerResponse, RpcError>;
-    async fn get_ledger_entries(&self, keys: Vec<String>) -> Result<LedgerEntriesResponse, RpcError>;
-    async fn get_events(
-        &self,
-        start_ledger: u32,
-        cursor: Option<String>,
-    ) -> Result<EventsResponse, RpcError>;
-    async fn simulate_transaction(&self, tx_xdr: String) -> Result<SimulateTransactionResponse, RpcError>;
-    async fn send_transaction(&self, tx_xdr: String) -> Result<SendTransactionResponse, RpcError>;
-    async fn get_transaction(&self, hash: &str) -> Result<GetTransactionResponse, RpcError>;
-}
-
-/// Concrete HTTP-backed Soroban RPC client with failover and retries.
-pub struct HttpSorobanRpc {
-    client: reqwest::Client,
-    config: SorobanRpcConfig,
-    endpoints: RwLock<Vec<EndpointState>>,
-    metrics: Arc<RpcMetrics>,
-    next_id: AtomicU64,
-}
-
-impl HttpSorobanRpc {
-    pub fn new(config: SorobanRpcConfig) -> Result<Self, RpcError> {
-        let client = reqwest::Client::builder()
-            .timeout(config.request_timeout)
-            .build()
-            .map_err(|e| RpcError::Transport(e.to_string()))?;
-        let endpoints = config
-            .endpoints
-            .iter()
-            .map(|url| EndpointState {
-                url: url.clone(),
-                healthy: true,
-                last_ledger: None,
-            })
-            .collect();
-        Ok(Self {
-            client,
-            config,
-            endpoints: RwLock::new(endpoints),
-            metrics: Arc::new(RpcMetrics::new()),
-            next_id: AtomicU64::new(1),
+        Ok(AccountInfo {
+            account_id: account_id.to_string(),
+            sequence: sequence.to_string(),
         })
     }
 
-    /// Shared metrics handle for observability.
-    pub fn metrics(&self) -> Arc<RpcMetrics> {
-        Arc::clone(&self.metrics)
-    }
-
-    /// Whether the RPC layer currently has at least one healthy endpoint.
-    pub async fn is_healthy(&self) -> bool {
-        self.endpoints.read().await.iter().any(|e| e.healthy)
-    }
-
-    /// Best known ledger across all endpoints.
-    async fn best_ledger(&self) -> Option<u32> {
-        self.endpoints
-            .read()
-            .await
-            .iter()
-            .filter_map(|e| e.last_ledger)
-            .max()
-    }
-
-    /// Update an endpoint's observed ledger and recompute its health relative
-    /// to the best known ledger across all endpoints.
-    async fn observe_ledger(&self, url: &str, ledger: u32) {
-        let mut endpoints = self.endpoints.write().await;
-        if let Some(ep) = endpoints.iter_mut().find(|e| e.url == url) {
-            ep.last_ledger = Some(ledger);
-        }
-        let best = endpoints.iter().filter_map(|e| e.last_ledger).max();
-        if let Some(best) = best {
-            for ep in endpoints.iter_mut() {
-                ep.healthy = match ep.last_ledger {
-                    Some(l) => best.saturating_sub(l) <= self.config.max_ledger_lag,
-                    None => ep.healthy,
-                };
-            }
-        }
-    }
-
-    /// Mark an endpoint unhealthy after a transport failure.
-    async fn mark_unhealthy(&self, url: &str) {
-        let mut endpoints = self.endpoints.write().await;
-        if let Some(ep) = endpoints.iter_mut().find(|e| e.url == url) {
-            ep.healthy = false;
-        }
-    }
-
-    /// Ordered list of candidate endpoints, healthy ones first.
-    async fn candidates(&self) -> Vec<String> {
-        let endpoints = self.endpoints.read().await;
-        let mut healthy: Vec<String> = endpoints
-            .iter()
-            .filter(|e| e.healthy)
-            .map(|e| e.url.clone())
-            .collect();
-        if healthy.is_empty() {
-            // Fall back to all endpoints so a transient outage can recover.
-            healthy = endpoints.iter().map(|e| e.url.clone()).collect();
-        }
-        healthy
-    }
-
-    /// Perform a single JSON-RPC call against one endpoint.
-    async fn call_once<T: for<'de> Deserialize<'de>>(
+    /// Read a batch of ledger entries at a fixed ledger sequence.
+    ///
+    /// `keys` is split into chunks of at most [`MAX_LEDGER_KEYS_PER_CALL`] so
+    /// the RPC's per-call limit is never exceeded. When `ledger_seq` is set the
+    /// request is pinned to that sequence, giving the reconciler a consistent
+    /// snapshot of on-chain state.
+    pub async fn get_ledger_entries(
         &self,
-        url: &str,
-        method: &str,
-        params: Value,
-    ) -> Result<T, RpcError> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let request = JsonRpcRequest::new(id, method, params);
+        keys: &[LedgerKey],
+        ledger_seq: Option<u32>,
+    ) -> Result<GetLedgerEntriesResponse, ChainError> {
+        let mut all_entries = Vec::with_capacity(keys.len());
+        let mut latest_ledger = None;
+
+        for chunk in keys.chunks(MAX_LEDGER_KEYS_PER_CALL) {
+            let key_strings: Vec<&str> = chunk.iter().map(|k| k.key.as_str()).collect();
+            let mut params = json!({ "keys": key_strings });
+            if let Some(seq) = ledger_seq {
+                params["ledgerSeq"] = json!(seq);
+            }
+
+            let body = json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getLedgerEntries",
+                "params": params,
+            });
+
+            let response = self
+                .http
+                .post(&self.endpoint)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| ChainError::Rpc(e.to_string()))?;
+
+            let status = response.status();
+            let value: Value = response
+                .json()
+                .await
+                .map_err(|e| ChainError::Rpc(e.to_string()))?;
+
+            if !status.is_success() {
+                return Err(ChainError::Rpc(format!(
+                    "getLedgerEntries failed with status {status}: {value}"
+                )));
+            }
+
+            if let Some(err) = value.get("error") {
+                return Err(ChainError::Rpc(err.to_string()));
+            }
+
+            let result = value.get("result").cloned().unwrap_or(Value::Null);
+            let parsed: GetLedgerEntriesResponse = serde_json::from_value(result)
+                .map_err(|e| ChainError::Rpc(e.to_string()))?;
+
+            if latest_ledger.is_none() {
+                latest_ledger = parsed.latest_ledger;
+            }
+            all_entries.extend(parsed.entries);
+        }
+
+        Ok(GetLedgerEntriesResponse {
+            entries: all_entries,
+            latest_ledger,
+        })
+    }
+
+    /// Return the latest closed ledger sequence.
+    pub async fn latest_ledger(&self) -> Result<u32, RpcError> {
+        let result = self.call("getLatestLedger", json!({})).await?;
+        result
+            .get("sequence")
+            .and_then(Value::as_u64)
+            .map(|s| s as u32)
+            .ok_or_else(|| RpcError::Unexpected("missing latest ledger sequence".into()))
+    }
+
+    /// Simulate a base64-encoded transaction envelope, returning either the
+    /// assembled resources or a decoded contract error.
+    pub async fn simulate_transaction(
+        &self,
+        transaction_xdr: &str,
+    ) -> Result<SimulationOutcome, RpcError> {
+        let params = json!({ "transaction": transaction_xdr });
+        let result = self.call("simulateTransaction", params).await?;
+
+        if let Some(err) = result.get("error").and_then(Value::as_str) {
+            return Ok(SimulationOutcome::Error(decode_contract_error(err)));
+        }
+
+        let transaction_data = result
+            .get("transactionData")
+            .and_then(Value::as_str)
+            .ok_or_else(|| RpcError::Unexpected("missing transactionData".into()))?;
+        let min_resource_fee = result
+            .get("minResourceFee")
+            .and_then(Value::as_str)
+            .unwrap_or("0")
+            .to_string();
+        let auth = result
+            .get("results")
+            .and_then(Value::as_array)
+            .and_then(|r| r.first())
+            .and_then(|r| r.get("auth"))
+            .and_then(Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let latest_ledger = result
+            .get("latestLedger")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32;
+
+        Ok(SimulationOutcome::Success(SimulationResult {
+            transaction_data: transaction_data.to_string(),
+            min_resource_fee,
+            auth,
+            latest_ledger,
+        }))
+    }
+
+    /// Submit a signed transaction envelope. `PENDING` and `DUPLICATE` are
+    /// both treated as accepted submissions; the caller tracks the lifecycle
+    /// via [`SorobanRpc::get_transaction`].
+    pub async fn send_transaction(&self, transaction_xdr: &str) -> Result<SendResult, RpcError> {
+        let params = json!({ "transaction": transaction_xdr });
+        let result = self.call("sendTransaction", params).await?;
+
+        let status = match result.get("status").and_then(Value::as_str) {
+            Some("PENDING") => SendStatus::Pending,
+            Some("DUPLICATE") => SendStatus::Duplicate,
+            Some("TRY_AGAIN_LATER") => SendStatus::TryAgainLater,
+            Some("ERROR") => SendStatus::Error,
+            other => {
+                return Err(RpcError::Unexpected(format!(
+                    "unknown sendTransaction status: {other:?}"
+                )))
+            }
+        };
+
+        Ok(SendResult {
+            status,
+            hash: result
+                .get("hash")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            latest_ledger: result
+                .get("latestLedger")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as u32,
+            error_result_xdr: result
+                .get("errorResultXdr")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        })
+    }
+
+    /// Poll the status of a previously submitted transaction by hash.
+    pub async fn get_transaction(&self, hash: &str) -> Result<GetResult, RpcError> {
+        let params = json!({ "hash": hash });
+        let result = self.call("getTransaction", params).await?;
+
+        let status = match result.get("status").and_then(Value::as_str) {
+            Some("SUCCESS") => GetStatus::Success,
+            Some("NOT_FOUND") => GetStatus::NotFound,
+            Some("FAILED") => GetStatus::Failed,
+            other => {
+                return Err(RpcError::Unexpected(format!(
+                    "unknown getTransaction status: {other:?}"
+                )))
+            }
+        };
+
+        Ok(GetResult {
+            status,
+            ledger: result
+                .get("ledger")
+                .and_then(Value::as_u64)
+                .map(|l| l as u32),
+            result_xdr: result
+                .get("resultXdr")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            latest_ledger: result
+                .get("latestLedger")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as u32,
+        })
+    }
+
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": params,
+        });
+
         let response = self
-            .client
-            .post(url)
-            .json(&request)
+            .http
+            .post(&self.endpoint)
+            .json(&body)
             .send()
             .await
             .map_err(|e| RpcError::Transport(e.to_string()))?;
 
         let status = response.status();
         if status.as_u16() == 429 {
-            return Err(RpcError::RateLimited(url.to_string()));
+            return Err(RpcError::RateLimited(self.endpoint.clone()));
         }
         if !status.is_success() {
             return Err(RpcError::Transport(format!("http {status}")));
@@ -457,10 +255,41 @@ impl HttpSorobanRpc {
             });
         }
 
-        let result = body
-            .result
-            .ok_or_else(|| RpcError::Decode("missing result".to_string()))?;
-        serde_json::from_value(result).map_err(|e| RpcError::Decode(e.to_string()))
+        body.result
+            .ok_or_else(|| RpcError::Decode("missing result in json-rpc response".into()))
+    }
+}
+            .send()
+            .await
+            .map_err(|e| RpcError::Transport(e.to_string()))?;
+
+        let status = response.status();
+        if status.as_u16() == 429 {
+            return Err(RpcError::RateLimited(url.to_string()));
+        }
+        if !status.is_success() {
+            return Err(RpcError::Transport(format!("http {status}")));
+        }
+
+        let payload: Value = response
+            .json()
+            .await
+            .map_err(|e| RpcError::Transport(e.to_string()))?;
+
+        if let Some(error) = payload.get("error") {
+            let code = error.get("code").and_then(Value::as_i64).unwrap_or(0);
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown rpc error")
+                .to_string();
+            return Err(RpcError::Rpc { code, message });
+        }
+
+        payload
+            .get("result")
+            .cloned()
+            .ok_or_else(|| RpcError::Unexpected("missing result".into()))
     }
 
     /// Execute an idempotent read with retries and endpoint failover.
@@ -502,64 +331,49 @@ impl HttpSorobanRpc {
     }
 }
 
-#[async_trait::async_trait]
-impl SorobanRpc for HttpSorobanRpc {
-    async fn get_health(&self) -> Result<HealthResponse, RpcError> {
-        let health: HealthResponse = self.call_read("getHealth", json!({})).await?;
-        if let Some(ledger) = health.latest_ledger {
-            let url = self.candidates().await.into_iter().next();
-            if let Some(url) = url {
-                self.observe_ledger(&url, ledger).await;
-            }
-        }
-        Ok(health)
+/// Decode a Soroban simulation error string into a contract error code and a
+/// human-readable message. Soroban encodes contract failures as
+/// `Error(Contract, #<code>)`; anything else is passed through verbatim.
+fn decode_contract_error(raw: &str) -> ContractError {
+    let code = raw
+        .split("#")
+        .nth(1)
+        .and_then(|s| s.trim_end_matches(')').trim().parse::<u32>().ok());
+
+    let message = match code {
+        Some(code) => format!("contract error #{code}: {raw}"),
+        None => raw.to_string(),
+    };
+
+    ContractError { code, message }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn next_sequence_increments_current() {
+        let info = AccountInfo {
+            account_id: "GABC".into(),
+            sequence: "42".into(),
+        };
+        assert_eq!(info.next_sequence().unwrap(), 43);
     }
 
-    async fn get_latest_ledger(&self) -> Result<LatestLedgerResponse, RpcError> {
-        let latest: LatestLedgerResponse = self.call_read("getLatestLedger", json!({})).await?;
-        let url = self.candidates().await.into_iter().next();
-        if let Some(url) = url {
-            self.observe_ledger(&url, latest.sequence).await;
-        }
-        Ok(latest)
+    #[test]
+    fn decodes_contract_error_code() {
+        let err = decode_contract_error("HostError: Error(Contract, #12)");
+        assert_eq!(err.code, Some(12));
+        assert!(err.message.contains("contract error #12"));
     }
 
-    async fn get_ledger_entries(&self, keys: Vec<String>) -> Result<LedgerEntriesResponse, RpcError> {
-        self.call_read("getLedgerEntries", json!({ "keys": keys }))
-            .await
+    #[test]
+    fn decodes_non_contract_error() {
+        let err = decode_contract_error("HostError: Error(WasmVm, MissingValue)");
+        assert_eq!(err.code, None);
+        assert_eq!(err.message, "HostError: Error(WasmVm, MissingValue)");
     }
-
-    async fn get_events(
-        &self,
-        start_ledger: u32,
-        cursor: Option<String>,
-    ) -> Result<EventsResponse, RpcError> {
-        let mut params = json!({ "startLedger": start_ledger });
-        if let Some(cursor) = cursor {
-            params["cursor"] = Value::String(cursor);
-        }
-        self.call_read("getEvents", params).await
-    }
-
-    async fn simulate_transaction(&self, tx_xdr: String) -> Result<SimulateTransactionResponse, RpcError> {
-        self.call_read("simulateTransaction", json!({ "transaction": tx_xdr }))
-            .await
-    }
-
-    async fn send_transaction(&self, tx_xdr: String) -> Result<SendTransactionResponse, RpcError> {
-        // Never blindly retried: the caller resubmits by hash if needed.
-        let candidates = self.candidates().await;
-        let url = candidates.first().ok_or(RpcError::NoHealthyEndpoint)?;
-        let started = Instant::now();
-        let outcome = self
-            .call_once::<SendTransactionResponse>(url, "sendTransaction", json!({ "transaction": tx_xdr }))
-            .await;
-        self.metrics
-            .record("sendTransaction", started.elapsed(), outcome.is_err());
-        outcome
-    }
-
-    async fn get_transaction(&self, hash: &str) -> Result<GetTransactionResponse, RpcError> {
-        self.call_read("getTransaction", json!({ "hash": hash })).await
+}
     }
 }

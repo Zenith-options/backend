@@ -13,19 +13,73 @@ use crate::error::{db_error, AppError, AppJson, AppQuery};
 use crate::models::{Account, Position};
 use crate::{black_scholes, smile_vol, AppState, BSInputs, BSResult};
 
+/// Default starting balance for a fresh paper account / epoch.
+pub const DEFAULT_STARTING_BALANCE: f64 = 100_000.0;
+
+/// Returns the wallet's current (open) epoch id, creating the account and
+/// its first epoch lazily if they don't exist yet. This keeps the old
+/// "lazily created account" behaviour while giving every account an
+/// explicit epoch to scope history, stats and leaderboards against.
+pub(crate) async fn ensure_current_epoch(
+    tx: &mut Transaction<'_, Sqlite>,
+    wallet_address: &str,
+) -> Result<i64, AppError> {
+    sqlx::query(
+        "INSERT INTO accounts (wallet_address) VALUES (?) ON CONFLICT(wallet_address) DO NOTHING",
+    )
+    .bind(wallet_address)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| db_error("create or confirm account", e))?;
+
+    let existing: Option<i64> = sqlx::query_scalar(
+        "SELECT current_epoch_id FROM accounts WHERE wallet_address = ?",
+    )
+    .bind(wallet_address)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|e| db_error("load account epoch", e))?;
+
+    if let Some(epoch_id) = existing {
+        return Ok(epoch_id);
+    }
+
+    let epoch_id: i64 = sqlx::query_scalar(
+        "INSERT INTO account_epochs (wallet_address, starting_balance)
+         VALUES (?, ?) RETURNING id",
+    )
+    .bind(wallet_address)
+    .bind(DEFAULT_STARTING_BALANCE)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|e| db_error("create account epoch", e))?;
+
+    sqlx::query("UPDATE accounts SET current_epoch_id = ? WHERE wallet_address = ?")
+        .bind(epoch_id)
+        .bind(wallet_address)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| db_error("set current epoch", e))?;
+
+    Ok(epoch_id)
+}
+
 pub async fn get_account(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
 ) -> Result<Json<Account>, AppError> {
     // Verify/login already creates this row, but stay defensive in case a
-    // session outlives some future account-deletion path.
-    sqlx::query(
-        "INSERT INTO accounts (wallet_address) VALUES (?) ON CONFLICT(wallet_address) DO NOTHING",
-    )
-    .bind(&wallet_address)
-    .execute(&state.db)
-    .await
-    .map_err(|e| db_error("create or confirm account", e))?;
+    // session outlives some future account-deletion path. We also make
+    // sure the account has a current epoch so history/stats scoping works.
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| db_error("begin account tx", e))?;
+    ensure_current_epoch(&mut tx, &wallet_address).await?;
+    tx.commit()
+        .await
+        .map_err(|e| db_error("commit account tx", e))?;
 
     let account: Account = sqlx::query_as("SELECT * FROM accounts WHERE wallet_address = ?")
         .bind(&wallet_address)
@@ -113,6 +167,9 @@ pub struct ListPositionsQuery {
     pub offset: Option<i64>,
     /// Opaque keyset cursor from a previous page's `next_cursor`.
     pub cursor: Option<String>,
+    /// "current" (default) scopes to the account's current epoch;
+    /// "all" includes every prior epoch's history.
+    pub epoch: Option<String>,
 }
 
 /// Response shape is still a bare JSON array (unchanged, since the
@@ -203,6 +260,20 @@ pub async fn list_positions(
     // Deprecated offset fallback (kept for one release).
     let offset = q.offset.unwrap_or(0).max(0);
 
+    // `?epoch=all` includes every epoch; anything else (including the
+    // default) scopes to the account's current epoch. A NULL epoch_id
+    // (legacy rows) is treated as belonging to the current epoch so old
+    // data isn't silently hidden.
+    let include_all = matches!(q.epoch.as_deref(), Some("all"));
+    let current_epoch: Option<i64> = sqlx::query_scalar(
+        "SELECT current_epoch_id FROM accounts WHERE wallet_address = ?",
+    )
+    .bind(&wallet_address)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| db_error("load current epoch", e))?
+    .flatten();
+
     // `? IS NULL OR column = ?` lets one query handle all four
     // status/strategy_id filter combinations without branching SQL.
     let positions: Vec<Position> = sqlx::query_as(
@@ -210,6 +281,7 @@ pub async fn list_positions(
             WHERE wallet_address = ?
               AND (? IS NULL OR status = ?)
               AND (? IS NULL OR strategy_id = ?)
+              AND (? = 1 OR epoch_id IS NULL OR epoch_id = ?)
          ORDER BY opened_at DESC, id DESC
          LIMIT ? OFFSET ?",
     )
@@ -218,6 +290,8 @@ pub async fn list_positions(
     .bind(&q.status)
     .bind(&q.strategy_id)
     .bind(&q.strategy_id)
+    .bind(include_all)
+    .bind(current_epoch)
     .bind(limit)
     .bind(offset)
     .fetch_all(&state.db)
@@ -228,13 +302,16 @@ pub async fn list_positions(
         "SELECT COUNT(*) FROM positions
             WHERE wallet_address = ?
               AND (? IS NULL OR status = ?)
-              AND (? IS NULL OR strategy_id = ?)",
+              AND (? IS NULL OR strategy_id = ?)
+              AND (? = 1 OR epoch_id IS NULL OR epoch_id = ?)",
     )
     .bind(&wallet_address)
     .bind(&q.status)
     .bind(&q.status)
     .bind(&q.strategy_id)
     .bind(&q.strategy_id)
+    .bind(include_all)
+    .bind(current_epoch)
     .fetch_one(&state.db)
     .await
     .map_err(|e| db_error("count positions", e))?;
@@ -329,11 +406,16 @@ pub(crate) async fn open_position_in_tx(
         -entry_premium * req.contracts // premium paid
     };
 
+    // Serialise on the account row so a reset can't interleave with an
+    // in-flight fill: the reset takes the same row lock before closing
+    // positions and starting a new epoch.
     let account: Account = sqlx::query_as("SELECT * FROM accounts WHERE wallet_address = ?")
         .bind(wallet_address)
         .fetch_one(&mut **tx)
         .await
         .map_err(|e| db_error("load account", e))?;
+
+    let epoch_id = ensure_current_epoch(tx, wallet_address).await?;
 
     let new_balance = account.balance + cash_delta;
     let new_collateral_locked = account.collateral_locked + collateral;
@@ -359,10 +441,31 @@ pub(crate) async fn open_position_in_tx(
     sqlx::query(
         "INSERT INTO positions
             (id, wallet_address, underlying, strike, expiry_days, option_type,
-             position_type, contracts, entry_premium, entry_spot, collateral, status, strategy_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)",
+             position_type, contracts, entry_premium, entry_spot, collateral, status, strategy_id, epoch_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)",
     )
     .bind(&id)
     .bind(wallet_address)
+    .bind(&req.underlying)
+    .bind(req.strike)
+    .bind(req.expiry_days)
+    .bind(&req.option_type)
+    .bind(&req.position_type)
+    .bind(req.contracts)
+    .bind(entry_premium)
+    .bind(spot)
+    .bind(collateral)
+    .bind(strategy_id)
+    .bind(epoch_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| db_error("insert position", e))?;
 
-/* … truncated 11625 chars — edit only what you need near the top … */
+    let position: Position = sqlx::query_as("SELECT * FROM positions WHERE id = ?")
+        .bind(&id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| db_error("load position", e))?;
+
+    Ok(position)
+}

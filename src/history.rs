@@ -17,6 +17,9 @@ pub struct HistoryQuery {
     pub offset: Option<i64>,
     /// Opaque, HMAC-signed keyset cursor encoding `(closed_at, id)`.
     pub cursor: Option<String>,
+    /// Epoch scoping. By default history is scoped to the wallet's current
+    /// epoch; `?epoch=all` includes every prior epoch (archived sessions).
+    pub epoch: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -31,7 +34,13 @@ pub struct HistoryStats {
 pub struct HistoryResponse {
     pub trades: Vec<Position>,
     pub stats: HistoryStats,
-    /// Whether requesting the next page would return more trades.
+    /// Epoch scoping. By default history is scoped to the wallet's current
+    /// epoch; `?epoch=all` includes every prior epoch (archived sessions).
+    pub epoch: Option<String>,
+    /// The epoch these trades/stats are scoped to. `None` when `?epoch=all`
+    /// was requested (i.e. the response spans every epoch).
+    pub epoch_id: Option<i64>,
+    /// Whether requesting the next `offset` would return more trades.
     /// `stats.trade_count` already IS the total across all pages, so
     /// unlike list_positions this doesn't need a separate response
     /// header — it's just another field on an already-object-shaped body.
@@ -53,6 +62,12 @@ pub struct HistoryResponse {
 /// backed by the composite index `(wallet_address, closed_at DESC, id DESC)`.
 /// The cursor binds the wallet address and the status filter set into its
 /// HMAC, so a cursor minted for a different filter set is rejected.
+///
+/// Epoch scoping: by default only the wallet's current epoch is returned.
+/// `?epoch=all` drops the epoch filter so archived sessions are included.
+/// A reset archives the prior session under its old epoch, so the default
+/// view reflects the live account while `?epoch=all` preserves the audit
+/// trail.
 pub async fn get_history(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
@@ -62,6 +77,28 @@ pub async fn get_history(
         .limit
         .unwrap_or(DEFAULT_LIST_LIMIT)
         .clamp(1, MAX_LIST_LIMIT);
+
+    let include_all_epochs = matches!(q.epoch.as_deref(), Some("all"));
+
+    // Resolve the wallet's current epoch. A wallet that has never been
+    // reset has exactly one epoch; if no epoch row exists yet (legacy
+    // account created before epochs were introduced) we fall back to
+    // unscoped history so nothing disappears.
+    let current_epoch: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM account_epochs
+            WHERE wallet_address = ? AND is_current = 1
+         ORDER BY id DESC LIMIT 1",
+    )
+    .bind(&wallet_address)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| db_error("load current account epoch", e))?;
+
+    let scope_epoch = if include_all_epochs {
+        None
+    } else {
+        current_epoch
+    };
 
     // The filter set is bound into the cursor HMAC so a cursor from a
     // different filter set cannot be replayed here.
@@ -84,11 +121,14 @@ pub async fn get_history(
         Some(c) => sqlx::query_as(
             "SELECT * FROM positions
                 WHERE wallet_address = ? AND status IN ('closed', 'rolled')
+                  AND (? IS NULL OR epoch_id = ?)
                   AND (closed_at < ? OR (closed_at = ? AND id < ?))
              ORDER BY closed_at DESC, id DESC
              LIMIT ?",
         )
         .bind(&wallet_address)
+        .bind(scope_epoch)
+        .bind(scope_epoch)
         .bind(c.sort_key)
         .bind(c.sort_key)
         .bind(c.id)
@@ -103,10 +143,13 @@ pub async fn get_history(
             sqlx::query_as(
                 "SELECT * FROM positions
                     WHERE wallet_address = ? AND status IN ('closed', 'rolled')
+                      AND (? IS NULL OR epoch_id = ?)
                  ORDER BY closed_at DESC, id DESC
                  LIMIT ? OFFSET ?",
             )
             .bind(&wallet_address)
+            .bind(scope_epoch)
+            .bind(scope_epoch)
             .bind(fetch_limit)
             .bind(offset)
             .fetch_all(&state.db)
@@ -144,9 +187,12 @@ pub async fn get_history(
                 COALESCE(SUM(CASE WHEN realized_pnl < 0 THEN 1 ELSE 0 END), 0),
                 SUM(realized_pnl)
              FROM positions
-             WHERE wallet_address = ? AND status IN ('closed', 'rolled')",
+             WHERE wallet_address = ? AND status IN ('closed', 'rolled')
+               AND (? IS NULL OR epoch_id = ?)",
         )
         .bind(&wallet_address)
+        .bind(scope_epoch)
+        .bind(scope_epoch)
         .fetch_one(&state.db)
         .await
         .map_err(|e| db_error("compute trade history stats", e))?;
@@ -161,6 +207,7 @@ pub async fn get_history(
     Ok(Json(HistoryResponse {
         trades,
         stats,
+        epoch_id: scope_epoch,
         has_more,
         next_cursor,
     }))
