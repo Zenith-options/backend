@@ -9,6 +9,8 @@
 //! view even though it's exercised by others.
 #![allow(dead_code)]
 
+pub mod perf;
+
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
@@ -21,6 +23,7 @@ use tower::ServiceExt;
 pub struct TestApp {
     router: axum::Router,
     db_path: std::path::PathBuf,
+    pool: sqlx::SqlitePool,
 }
 
 impl Drop for TestApp {
@@ -34,11 +37,19 @@ impl TestApp {
         let db_path = std::env::temp_dir().join(format!("zenith-test-{}.db", uuid::Uuid::new_v4()));
         let database_url = format!("sqlite://{}", db_path.display());
         let pool = zenith_backend::db::init_pool(&database_url).await;
-        let state = zenith_backend::AppState::new(pool);
+        let state = zenith_backend::AppState::new(pool.clone());
         Self {
             router: zenith_backend::build_router(state),
             db_path,
+            pool,
         }
+    }
+
+    /// Direct handle to the test database, for tests that need to seed or
+    /// inspect state the HTTP API doesn't expose (e.g. read-model
+    /// benchmarks, consistency checks).
+    pub fn db(&self) -> &sqlx::SqlitePool {
+        &self.pool
     }
 
     async fn send(&self, req: Request<Body>) -> (StatusCode, Value) {

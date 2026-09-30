@@ -7,6 +7,10 @@ edition = "2021"
 name = "zenith-backend"
 path = "src/main.rs"
 
+[[bin]]
+name = "zenith-admin"
+path = "src/admin.rs"
+
 [dependencies]
 axum = { version = "0.7", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
@@ -26,6 +30,11 @@ validator = { version = "0.18", features = ["derive"] }
 sha2 = "0.10"
 hmac = "0.12"
 chrono = "0.4"
+async-trait = "0.1"
+arrow = "53"
+parquet = "53"
+moka = { version = "0.12", features = ["sync"] }
+redis = { version = "0.27", features = ["tokio-comp"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

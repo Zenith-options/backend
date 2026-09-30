@@ -6,18 +6,23 @@ use serde::Deserialize;
 use crate::auth::AuthUser;
 use crate::error::{db_error, AppError, AppJson};
 use crate::models::Alert;
+use crate::outbox::{self, AlertTriggeredPayload, DomainEvent, EVENT_VERSION};
 use crate::AppState;
 
 pub async fn get_alerts(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
 ) -> Result<Json<Vec<Alert>>, AppError> {
-    let alerts: Vec<Alert> =
-        sqlx::query_as("SELECT * FROM alerts WHERE wallet_address = ? ORDER BY created_at DESC")
-            .bind(&wallet_address)
-            .fetch_all(&state.db)
-            .await
-            .map_err(|e| db_error("load alerts", e))?;
+    // `id!` overrides the TEXT-PK nullable quirk; `triggered: bool` overrides
+    // the INTEGER column to decode as the model's bool.
+    let alerts: Vec<Alert> = sqlx::query_as!(
+        Alert,
+        "SELECT id AS \"id!\", wallet_address, underlying, condition, target_price, triggered AS \"triggered: bool\", created_at, triggered_at FROM alerts WHERE wallet_address = ? ORDER BY created_at DESC",
+        &wallet_address
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| db_error("load alerts", e))?;
 
     Ok(Json(alerts))
 }
@@ -59,24 +64,26 @@ pub async fn create_alert(
     }
 
     let id = uuid::Uuid::new_v4().to_string();
-    sqlx::query(
-        "INSERT INTO alerts (id, wallet_address, underlying, condition, target_price)
-         VALUES (?, ?, ?, ?, ?)",
+    sqlx::query!(
+        "INSERT INTO alerts (id, wallet_address, underlying, condition, target_price) VALUES (?, ?, ?, ?, ?)",
+        &id,
+        &wallet_address,
+        &req.underlying,
+        &req.condition,
+        req.target_price
     )
-    .bind(&id)
-    .bind(&wallet_address)
-    .bind(&req.underlying)
-    .bind(&req.condition)
-    .bind(req.target_price)
     .execute(&state.db)
     .await
     .map_err(|e| db_error("create alert", e))?;
 
-    let alert: Alert = sqlx::query_as("SELECT * FROM alerts WHERE id = ?")
-        .bind(&id)
-        .fetch_one(&state.db)
-        .await
-        .map_err(|e| db_error("load the alert just created", e))?;
+    let alert: Alert = sqlx::query_as!(
+        Alert,
+        "SELECT id AS \"id!\", wallet_address, underlying, condition, target_price, triggered AS \"triggered: bool\", created_at, triggered_at FROM alerts WHERE id = ?",
+        &id
+    )
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| db_error("load the alert just created", e))?;
 
     Ok(Json(alert))
 }
@@ -86,9 +93,7 @@ pub async fn delete_alert(
     AuthUser(wallet_address): AuthUser,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    let result = sqlx::query("DELETE FROM alerts WHERE id = ? AND wallet_address = ?")
-        .bind(&id)
-        .bind(&wallet_address)
+    let result = sqlx::query!("DELETE FROM alerts WHERE id = ? AND wallet_address = ?", &id, &wallet_address)
         .execute(&state.db)
         .await
         .map_err(|e| db_error("delete alert", e))?;
@@ -108,36 +113,76 @@ pub async fn delete_alert(
 /// total number of alerts fired across every underlying this pass —
 /// pulled out of the loop below so a test can assert on it directly
 /// instead of only through log lines on a live 10-second timer.
+///
+/// Each trigger and its `AlertTriggered` outbox event commit atomically:
+/// the UPDATE ... RETURNING yields the ids of the rows that fired, and the
+/// events are written into the outbox inside the same transaction, so an
+/// alert whose event can't be recorded isn't left marked triggered (it
+/// simply retries on the next pass).
 pub async fn check_once(state: &AppState) -> u64 {
     let prices = state.spot_prices.lock().unwrap().clone();
+
+    let mut tx = match state.db.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::warn!(error = %e, "alert check failed to begin transaction");
+            return 0;
+        }
+    };
+
     let mut total_fired = 0;
     for (underlying, spot) in prices {
-        let result = sqlx::query(
-            "UPDATE alerts
-                SET triggered = 1, triggered_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-             WHERE underlying = ? AND triggered = 0
-               AND ((condition = 'above' AND target_price <= ?)
-                 OR (condition = 'below' AND target_price >= ?))",
-        )
-        .bind(&underlying)
-        .bind(spot)
-        .bind(spot)
-        .execute(&state.db)
-        .await;
+        let fired: Result<Vec<(String, String, String, String, f64, String)>, _> =
+            sqlx::query_as(
+                "UPDATE alerts
+                    SET triggered = 1, triggered_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE underlying = ? AND triggered = 0
+                   AND ((condition = 'above' AND target_price <= ?)
+                     OR (condition = 'below' AND target_price >= ?))
+                 RETURNING id, wallet_address, underlying, condition, target_price, triggered_at",
+            )
+            .bind(&underlying)
+            .bind(spot)
+            .bind(spot)
+            .fetch_all(&mut *tx)
+            .await;
 
-        match result {
-            Ok(r) if r.rows_affected() > 0 => {
-                tracing::info!(
-                    underlying,
-                    spot,
-                    fired = r.rows_affected(),
-                    "alerts triggered"
-                );
-                total_fired += r.rows_affected();
+        match fired {
+            Ok(rows) => {
+                for (id, wallet_address, underlying, condition, target_price, triggered_at) in rows {
+                    total_fired += 1;
+                    tracing::info!(
+                        underlying,
+                        spot,
+                        "alert triggered"
+                    );
+                    let event = DomainEvent::AlertTriggered(AlertTriggeredPayload {
+                        version: EVENT_VERSION,
+                        alert_id: id,
+                        wallet_address,
+                        underlying,
+                        condition,
+                        target_price,
+                        triggered_at,
+                    });
+                    if let Err(e) = outbox::emit(&mut tx, &event).await {
+                        let _ = tx.rollback().await;
+                        tracing::warn!(error = %e, "failed to emit alert_triggered event");
+                        return 0;
+                    }
+                }
             }
-            Ok(_) => {}
-            Err(e) => tracing::warn!(error = %e, "alert check failed"),
+            Err(e) => {
+                let _ = tx.rollback().await;
+                tracing::warn!(error = %e, "alert check failed");
+                return 0;
+            }
         }
+    }
+
+    if let Err(e) = tx.commit().await {
+        tracing::warn!(error = %e, "alert check failed to commit");
+        return 0;
     }
     total_fired
 }
