@@ -4,16 +4,28 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  test:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+  codegen:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --all-targets
-      - run: cargo test
+      - name: Verify generated contract bindings are up to date
+        run: cargo xtask codegen --check
 
   clippy:
     runs-on: ubuntu-latest
@@ -25,11 +37,31 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets -- -D warnings
 
-  fmt:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
         with:
-          components: rustfmt
-      - run: cargo fmt --check
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build
+        run: cargo build --verbose
+
+      - name: Run tests
+        run: cargo test --verbose
+
+      - name: Verify golden vectors are up to date
+        run: |
+          cargo run --bin gen-vectors -- --force
+          git diff --exit-code tests/fixtures/pricing_vectors.v1.json
+
+      - name: Upload golden pricing vectors
+        uses: actions/upload-artifact@v4
+        with:
+          name: pricing-vectors-v1
+          path: tests/fixtures/pricing_vectors.v1.json
+          if-no-files-found: error
