@@ -1,0 +1,11 @@
+services:
+  stellar-local:
+    image: stellar/quickstart:testing
+    command: --local --enable-soroban-rpc --enable-soroban-rpc-unsafe-methods
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/soroban/rpc"]
+      interval: 2s
+      timeout: 2s
+      retries: 60

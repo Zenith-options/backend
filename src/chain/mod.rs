@@ -1,3 +1,6 @@
+pub mod mode;
+pub mod observability;
+pub mod policy;
 pub mod types;
 pub mod bindings;
 pub mod horizon;
