@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 #[derive(Clone, Deserialize)]
 #[serde(default)]
@@ -19,6 +20,11 @@ pub struct Config {
     pub deprecated_routes: Vec<String>,
     pub deprecation_timestamp: Option<u64>,
     pub sunset_date: Option<String>,
+    pub channel_accounts: Vec<String>,
+    pub channel_lease_ttl_secs: u64,
+    pub channel_sequence_reservation_batch: u32,
+    pub channel_min_xlm_reserve: i64,
+    pub channel_health_check_interval_secs: u64,
 }
 
 impl Default for Config {
@@ -48,6 +54,11 @@ impl Default for Config {
             deprecated_routes: Vec::new(),
             deprecation_timestamp: None,
             sunset_date: None,
+            channel_accounts: Vec::new(),
+            channel_lease_ttl_secs: 30,
+            channel_sequence_reservation_batch: 8,
+            channel_min_xlm_reserve: 10_000_000,
+            channel_health_check_interval_secs: 60,
         }
     }
 }
@@ -75,6 +86,17 @@ impl std::fmt::Debug for Config {
             .field("deprecated_routes", &self.deprecated_routes)
             .field("deprecation_timestamp", &self.deprecation_timestamp)
             .field("sunset_date", &self.sunset_date)
+            .field("channel_accounts", &self.channel_accounts)
+            .field("channel_lease_ttl_secs", &self.channel_lease_ttl_secs)
+            .field(
+                "channel_sequence_reservation_batch",
+                &self.channel_sequence_reservation_batch,
+            )
+            .field("channel_min_xlm_reserve", &self.channel_min_xlm_reserve)
+            .field(
+                "channel_health_check_interval_secs",
+                &self.channel_health_check_interval_secs,
+            )
             .finish()
     }
 }
@@ -174,6 +196,18 @@ impl Config {
                 )
             }
             "SUNSET_DATE" => self.sunset_date = Some(value.into()),
+            "CHANNEL_ACCOUNTS" => {
+                self.channel_accounts = serde_json::from_str(value)
+                    .map_err(|e| format!("invalid value for {key}: {e}"))?
+            }
+            "CHANNEL_LEASE_TTL_SECS" => parse!(channel_lease_ttl_secs, u64),
+            "CHANNEL_SEQUENCE_RESERVATION_BATCH" => {
+                parse!(channel_sequence_reservation_batch, u32)
+            }
+            "CHANNEL_MIN_XLM_RESERVE" => parse!(channel_min_xlm_reserve, i64),
+            "CHANNEL_HEALTH_CHECK_INTERVAL_SECS" => {
+                parse!(channel_health_check_interval_secs, u64)
+            }
             _ => return Err(format!("unknown configuration key: {key}")),
         }
         Ok(())
@@ -235,6 +269,28 @@ impl Config {
             httpdate::parse_http_date(sunset)
                 .map_err(|_| "sunset_date must be an RFC 1123 HTTP-date".to_string())?;
         }
+        if self.channel_accounts.is_empty() {
+            return Err("channel_accounts must contain at least one secret reference".into());
+        }
+        if self
+            .channel_accounts
+            .iter()
+            .any(|account| account.trim().is_empty())
+        {
+            return Err("channel_accounts entries must be non-empty".into());
+        }
+        if self.channel_lease_ttl_secs == 0 {
+            return Err("channel_lease_ttl_secs must be positive".into());
+        }
+        if self.channel_sequence_reservation_batch == 0 {
+            return Err("channel_sequence_reservation_batch must be positive".into());
+        }
+        if self.channel_min_xlm_reserve <= 0 {
+            return Err("channel_min_xlm_reserve must be positive".into());
+        }
+        if self.channel_health_check_interval_secs == 0 {
+            return Err("channel_health_check_interval_secs must be positive".into());
+        }
         Ok(())
     }
 }
@@ -268,6 +324,28 @@ mod tests {
     fn rejects_invalid_values() {
         let config = Config {
             max_pct_move_per_tick: 1.0,
+            ..Config::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn channel_pool_defaults_are_valid() {
+        let config = Config {
+            channel_accounts: vec!["secret://channel-0".into()],
+            ..Config::default()
+        };
+        assert!(config.validate().is_ok());
+        assert_eq!(
+            config.channel_lease_ttl(),
+            Duration::from_secs(config.channel_lease_ttl_secs)
+        );
+    }
+
+    #[test]
+    fn rejects_empty_channel_accounts() {
+        let config = Config {
+            channel_accounts: Vec::new(),
             ..Config::default()
         };
         assert!(config.validate().is_err());
