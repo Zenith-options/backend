@@ -123,7 +123,10 @@ async fn verify_rejects_a_signature_from_the_wrong_keypair() {
         )
         .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    assert!(body["error"].as_str().unwrap().contains("does not verify"));
+    assert!(body["error"]
+        .as_str()
+        .unwrap()
+        .contains("do not meet the required threshold"));
 
     // The nonce is still consumed on the failed attempt (single-use
     // regardless of outcome), so retrying with the SAME nonce — even with

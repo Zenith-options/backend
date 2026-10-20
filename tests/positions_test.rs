@@ -208,13 +208,13 @@ async fn strategy_execute_is_atomic_on_partial_failure() {
             serde_json::json!({
                 "legs": [
                     { "underlying": "BTC", "strike": 68000, "expiry_days": 30, "option_type": "call", "position_type": "long", "contracts": 1 },
-                    { "underlying": "DOGE", "strike": 1, "expiry_days": 30, "option_type": "call", "position_type": "long", "contracts": 1 }
+                    { "underlying": "BTC", "strike": 70000, "expiry_days": 30, "option_type": "call", "position_type": "short", "contracts": 1000000 }
                 ]
             }),
             Some(&token),
         )
         .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 
     let (_, positions) = app.get_with("/api/v1/positions", Some(&token)).await;
     assert_eq!(

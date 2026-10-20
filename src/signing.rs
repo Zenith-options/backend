@@ -524,5 +524,4 @@ impl SponsorKeyPool {
     }
 }
 
-    }
-}
+

@@ -82,9 +82,10 @@ async fn list_strategies_summarizes_an_open_strategy() {
     assert_eq!(s["open_leg_count"].as_i64().unwrap(), 2);
     assert_eq!(s["status"].as_str().unwrap(), "open");
     // Spot/vol haven't moved since the legs were opened (no simulator
-    // running in tests), so repricing them now must round-trip exactly.
-    assert_eq!(s["realized_pnl"].as_f64().unwrap(), 0.0);
-    assert_eq!(s["unrealized_pnl"].as_f64().unwrap(), 0.0);
+    // running in tests), so repricing them now must round-trip to zero —
+    // up to the 10^-7 fixed-point storage precision.
+    assert!((s["realized_pnl"].as_f64().unwrap()).abs() < 1e-6);
+    assert!((s["unrealized_pnl"].as_f64().unwrap()).abs() < 1e-6);
 }
 
 #[tokio::test]

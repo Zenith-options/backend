@@ -70,10 +70,12 @@ fn leg_unrealized_pnl(state: &AppState, p: &Position) -> f64 {
     let Some(result) = current_bs_result(state, p) else {
         return 0.0;
     };
+    let entry = p.entry_premium.to_f64();
+    let contracts = p.contracts.to_f64();
     if p.position_type == "short" {
-        (p.entry_premium - result.premium) * p.contracts
+        (entry - result.premium) * contracts
     } else {
-        (result.premium - p.entry_premium) * p.contracts
+        (result.premium - entry) * contracts
     }
 }
 
@@ -94,7 +96,7 @@ pub struct StrategySummary {
 
 fn summarize(state: &AppState, strategy_id: String, legs: &[Position]) -> StrategySummary {
     let open_leg_count = legs.iter().filter(|p| p.status == "open").count();
-    let realized_pnl = legs.iter().filter_map(|p| p.realized_pnl).sum();
+    let realized_pnl = legs.iter().filter_map(|p| p.realized_pnl).map(|m| m.to_f64()).sum();
     let unrealized_pnl = legs
         .iter()
         .filter(|p| p.status == "open")
@@ -284,8 +286,10 @@ mod tests {
         sqlx::query(
             "INSERT INTO positions
                 (id, wallet_address, underlying, strike, expiry_days, option_type,
-                 position_type, contracts, entry_premium, entry_spot, status, realized_pnl, strategy_id)
-             VALUES ('p1', 'GTEST', 'BTC', 70000, 30, 'call', 'long', 1, 100, 67000, 'closed', 50.0, 's1')",
+                 position_type, contracts, entry_premium, entry_spot, status,
+                 close_premium, close_spot, realized_pnl, closed_at, strategy_id)
+             VALUES ('p1', 'GTEST', 'BTC', 700000000000, 30, 'call', 'long', 10000000, 1000000000, 670000000000, 'closed',
+                     0, 670000000000, 500000000, '2024-01-01T00:00:00.000Z', 's1')",
         )
         .execute(&state.db)
         .await
@@ -294,7 +298,7 @@ mod tests {
             "INSERT INTO positions
                 (id, wallet_address, underlying, strike, expiry_days, option_type,
                  position_type, contracts, entry_premium, entry_spot, status, strategy_id)
-             VALUES ('p2', 'GTEST', 'RETIRED', 100, 30, 'call', 'long', 1, 5, 100, 'open', 's1')",
+             VALUES ('p2', 'GTEST', 'RETIRED', 1000000000, 30, 'call', 'long', 10000000, 50000000, 1000000000, 'open', 's1')",
         )
         .execute(&state.db)
         .await
