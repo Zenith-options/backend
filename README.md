@@ -82,6 +82,12 @@ and validates the result. `docs/runbooks/disaster-recovery.md` lists every
 piece of durable state (including indexer cursors and on-chain sequence
 numbers) and the recovery procedure for each failure scenario.
 
+Liquidation shortfalls are never netted away silently: `src/insurance.rs`
+records each one as a deficit, covers it from an append-only insurance
+reserve as far as the reserve allows, and keeps the rest open until it's
+covered or explicitly written off. `GET /api/v1/insurance/coverage`
+publishes the reserve's coverage ratio. See `docs/insurance-reserve.md`.
+
 
 ## Endpoints
 
@@ -114,6 +120,7 @@ All `/api/v1/*` endpoints marked **auth** require an
 | `GET /api/v1/chain` | Full option chain (calls+puts) across strikes for one expiry |
 | `GET /api/v1/expiries/:underlying` | Available expiries for an underlying |
 | `GET /api/v1/stats` | Protocol-wide stats (mocked, not derived from real trades) |
+| `GET /api/v1/insurance/coverage` | Insurance reserve balance, open deficits and coverage ratio |
 | `GET /api/v1/ws/spot` | WebSocket: snapshot on connect, then a live tick every ~2s |
 | `POST /api/v1/portfolio/payoff` | Combined P&L curve for a set of caller-supplied legs (no auth — legs carry their own premium) |
 
