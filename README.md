@@ -129,6 +129,7 @@ requiring a session — see `mutation_rate_limited_routes()` in `lib.rs`.
 | `GET /api/v1/account` | Balance + locked collateral |
 | `GET /api/v1/positions` | List positions (`?status=`, `?strategy_id=`, `?limit=`, `?offset=`) |
 | `POST /api/v1/positions/open` | Price and open one position |
+| `POST /api/v1/positions/:id/exercise` | Exercise a long position quantity (up to 7 decimals) against its persisted expiry fixing; include a stable `request_id` for retry safety |
 | `POST /api/v1/positions/:id/close` | Settle an open position at current spot/vol |
 | `POST /api/v1/positions/:id/roll` | Close + reopen at a new strike/expiry, atomically |
 | `GET /api/v1/history` | Closed/rolled positions + win/loss/pnl stats (`?limit=`, `?offset=` — stats always cover the full history, not just the returned page) |
@@ -138,6 +139,14 @@ requiring a session — see `mutation_rate_limited_routes()` in `lib.rs`.
 | `GET /api/v1/strategies` | List multi-leg strategies with aggregate realized/unrealized P&L |
 | `GET /api/v1/strategies/:id` | One strategy's legs + aggregate P&L |
 | `POST /api/v1/strategies/:id/close` | Close every currently-open leg of a strategy atomically |
+
+### Operator health **operator bearer token**
+
+`GET /admin/settlement` renders the current settlement queue, stuck chain
+transactions, account margin breaches, vault reserve coverage, and keeper
+liveness. Set `ZENITH_OPERATOR_TOKEN` and send
+`Authorization: Bearer <token>`. Reserve coverage is shown as unavailable
+until a `vault_reserve_snapshots` observation has been recorded.
 
 ### Watchlist & alerts **auth**
 

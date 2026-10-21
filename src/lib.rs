@@ -21,6 +21,7 @@ pub mod history;
 pub mod math_fixed;
 pub mod models;
 pub mod operator;
+pub mod partial_exercise;
 pub mod payoff;
 pub mod positions;
 pub mod prices;
@@ -603,6 +604,10 @@ fn mutation_rate_limited_routes() -> Router<AppState> {
         .route(
             "/api/v1/positions/:id/close",
             post(positions::close_position),
+        )
+        .route(
+            "/api/v1/positions/:id/exercise",
+            post(partial_exercise::exercise_position),
         )
         .route("/api/v1/positions/:id/roll", post(positions::roll_position))
         .route("/api/v1/watchlist", post(watchlist::add_watchlist))

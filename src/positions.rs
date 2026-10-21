@@ -30,7 +30,7 @@ pub(crate) fn time_to_expiry_years(expires_at: &str, now_unix: i64) -> f64 {
 /// Minimal ISO-8601 UTC parser (`YYYY-MM-DDTHH:MM:SSZ`), returning Unix
 /// seconds. Kept local so this module doesn't pull in a new dependency; the
 /// migration writes exactly this format.
-fn parse_iso8601_utc(s: &str) -> Option<i64> {
+pub(crate) fn parse_iso8601_utc(s: &str) -> Option<i64> {
     let s = s.trim_end_matches('Z');
     let (date, time) = s.split_once('T')?;
     let mut d = date.split('-');
@@ -439,6 +439,7 @@ pub(crate) async fn open_position_in_tx(
     req: &OpenPositionRequest,
     strategy_id: Option<&str>,
 ) -> Result<Position, AppError> {
+    let contracts_scaled = crate::partial_exercise::normalized_quantity(req.contracts)?;
     if req.contracts <= 0.0 || req.strike <= 0.0 || req.expiry_days <= 0.0 {
         return Err(AppError::new(
             StatusCode::BAD_REQUEST,
@@ -586,7 +587,7 @@ pub(crate) async fn open_position_in_tx(
     .bind(&expires_at)
     .bind(&req.option_type)
     .bind(&req.position_type)
-    .bind(req.contracts)
+    .bind(contracts_scaled)
     .bind(premium)
     .bind(spot)
     .bind(requirement.contribution_for(&id))
