@@ -20,6 +20,7 @@ pub mod error;
 pub mod history;
 pub mod math_fixed;
 pub mod models;
+pub mod operator;
 pub mod payoff;
 pub mod positions;
 pub mod prices;
@@ -628,6 +629,7 @@ pub fn build_router(state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(health))
+        .route("/admin/settlement", get(operator::settlement_dashboard))
         .route("/api/v1/spot", get(get_spot))
         .route("/api/v1/price", get(price_option))
         .route("/api/v1/iv", get(get_implied_vol))
