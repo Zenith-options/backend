@@ -36,21 +36,6 @@
 //! (open/close/roll/strategy execution) can select a model per environment
 //! via a feature flag.
 
-use rust_decimal::Decimal;
-use rust_decimal::RoundingStrategy;
-
-/// Fixed-point monetary amount backed by `rust_decimal::Decimal`.
-///
-/// Display uses banker's rounding; fees and collateral use
-/// round-against-the-user (see [`Money::round_against_user`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Money(Decimal);
-
-impl Money {
-    /// Explicit conversion boundary from the `f64` pricing math.
-    ///
-    /// Returns `None` for NaN and ±Inf so callers can surface
-
 /// A single option leg held by a wallet, as seen by the margin engine.
 ///
 /// `contracts` is signed: positive for long, negative for short. `strike`
@@ -219,25 +204,6 @@ use rust_decimal::RoundingStrategy;
 pub struct Money(Decimal);
 
 impl Money {
-    /// Explicit conversion boundary from the `f64` pricing math.
-    ///
-    /// Returns `None` for NaN and ±Inf so callers can surface
-
-use rust_decimal::Decimal;
-use rust_decimal::RoundingStrategy;
-
-/// Fixed-point monetary amount backed by `rust_decimal::Decimal`.
-///
-/// Display uses banker's rounding; fees and collateral use
-/// round-against-the-user (see [`Money::round_against_user`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Money(Decimal);
-
-impl Money {
-    /// Explicit conversion boundary from the `f64` pricing math.
-    ///
-    /// Returns `None` for NaN and ±Inf so callers can surface an error
-    /// instead of silently propagating a non-finite balance.
     pub fn from_price(value: f64) -> Option<Self> {
         if !value.is_finite() {
             return None;
@@ -245,34 +211,25 @@ impl Money {
         Decimal::from_f64_retain(value).map(Money)
     }
 
-    /// Round-against-the-user: round away from zero to `scale` decimal
-    /// places. Used for fees and collateral so the protocol never loses.
     pub fn round_against_user(self, scale: u32) -> Self {
-        Money(self.0.round_dp_with_strategy(
-            scale,
-            RoundingStrategy::AwayFromZero,
-        ))
+        Money(
+            self.0
+                .round_dp_with_strategy(scale, RoundingStrategy::AwayFromZero),
+        )
     }
 
-    /// Banker's rounding (round-half-to-even) for display purposes.
     pub fn round_for_display(self, scale: u32) -> Self {
-        Money(self.0.round_dp_with_strategy(
-            scale,
-            RoundingStrategy::ToEven,
-        ))
+        Money(self.0.round_dp_with_strategy(scale, RoundingStrategy::ToEven))
     }
 
-    /// Checked multiplication; returns `None` on overflow instead of panicking.
     pub fn checked_mul(self, rhs: Self) -> Option<Self> {
         self.0.checked_mul(rhs.0).map(Money)
     }
 
-    /// Checked addition; returns `None` on overflow instead of panicking.
     pub fn checked_add(self, rhs: Self) -> Option<Self> {
         self.0.checked_add(rhs.0).map(Money)
     }
 
-    /// The underlying decimal value.
     pub fn value(self) -> Decimal {
         self.0
     }
@@ -280,8 +237,6 @@ impl Money {
 
 impl std::fmt::Display for Money {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Banker's rounding for display, then render as a plain string so
-        // JSON consumers never see a JS float precision artifact.
         write!(f, "{}", self.round_for_display(7).0)
     }
 }
@@ -356,7 +311,11 @@ pub fn remargin_action(
     locked: f64,
     config: &RemarginConfig,
 ) -> RemarginAction {
-    let required = collateral_required(option_type, contracts, strike, spot);
+    let required = if option_type == "call" {
+        contracts * spot
+    } else {
+        contracts * strike * 1.1
+    };
     let drift = required - locked;
 
     if locked <= 0.0 {
