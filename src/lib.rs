@@ -16,6 +16,7 @@ pub mod alerts;
 pub mod auth;
 pub mod collateral;
 pub mod compliance;
+pub mod contract_pins;
 pub mod db;
 pub mod error;
 pub mod history;
