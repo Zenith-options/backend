@@ -4,7 +4,7 @@
 //! must be a trusted contract-event processor that has verified the transfer
 //! event and settlement transaction on-chain.
 
-use sqlx::{SqlitePool, Transaction};
+use sqlx::SqlitePool;
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct TransferOffer {

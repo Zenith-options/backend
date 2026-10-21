@@ -30,6 +30,7 @@ pub mod request_id;
 pub mod secrets;
 pub mod signing;
 pub mod strategies;
+pub mod strategy_execution;
 pub mod strkey;
 pub mod watchlist;
 

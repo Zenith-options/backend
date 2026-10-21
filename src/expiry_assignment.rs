@@ -3,9 +3,9 @@
 //! This module computes auditable backend instructions. The expiry keeper must
 //! still submit and confirm the corresponding on-chain settlement transaction.
 
+use sqlx::SqlitePool;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use sqlx::SqlitePool;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OptionRight {
@@ -62,7 +62,8 @@ pub fn exercise_by_exception(
     strike: f64,
     minimum_intrinsic: f64,
 ) -> Result<bool, AssignmentError> {
-    if !spot.is_finite()
+    if now < 0
+        || !spot.is_finite()
         || !strike.is_finite()
         || !minimum_intrinsic.is_finite()
         || spot < 0.0
@@ -179,7 +180,9 @@ pub async fn persist_confirmed_run(
         || !run.minimum_intrinsic.is_finite()
         || run.minimum_intrinsic < 0.0
     {
-        return Err(sqlx::Error::Protocol("invalid expiry settlement run".into()));
+        return Err(sqlx::Error::Protocol(
+            "invalid expiry settlement run".into(),
+        ));
     }
     let mut decision_ids = HashSet::with_capacity(decisions.len());
     let mut exercised = 0u64;
@@ -190,7 +193,9 @@ pub async fn persist_confirmed_run(
             || decision.intrinsic_per_contract <= 0.0
             || !decision_ids.insert(&decision.position_id)
         {
-            return Err(sqlx::Error::Protocol("invalid or duplicate exercise decision".into()));
+            return Err(sqlx::Error::Protocol(
+                "invalid or duplicate exercise decision".into(),
+            ));
         }
         exercised = exercised
             .checked_add(decision.exercised_contracts)
@@ -203,7 +208,9 @@ pub async fn persist_confirmed_run(
             || assignment.assigned_contracts == 0
             || !assignment_ids.insert(&assignment.position_id)
         {
-            return Err(sqlx::Error::Protocol("invalid or duplicate writer assignment".into()));
+            return Err(sqlx::Error::Protocol(
+                "invalid or duplicate writer assignment".into(),
+            ));
         }
         assigned = assigned
             .checked_add(assignment.assigned_contracts)
