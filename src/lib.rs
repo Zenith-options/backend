@@ -22,6 +22,7 @@ pub mod keeper;
 pub mod math_fixed;
 pub mod models;
 pub mod payoff;
+pub mod privacy;
 pub mod positions;
 pub mod prices;
 pub mod rate_limit_key;
@@ -660,6 +661,11 @@ pub fn build_router(state: AppState) -> Router {
             get(positions::get_portfolio_greeks),
         )
         .route("/api/v1/keeper/bounties", get(keeper::bounty::accounting))
+        .route("/api/v1/privacy/export", get(privacy::export))
+        .route(
+            "/api/v1/privacy/erasure",
+            axum::routing::delete(privacy::erase),
+        )
         .layer(PropagateRequestIdLayer::new(request_id_header()))
         .layer(TraceLayer::new_for_http())
         .layer(SetRequestIdLayer::new(
