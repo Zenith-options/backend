@@ -36,21 +36,6 @@
 //! (open/close/roll/strategy execution) can select a model per environment
 //! via a feature flag.
 
-use rust_decimal::Decimal;
-use rust_decimal::RoundingStrategy;
-
-/// Fixed-point monetary amount backed by `rust_decimal::Decimal`.
-///
-/// Display uses banker's rounding; fees and collateral use
-/// round-against-the-user (see [`Money::round_against_user`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Money(Decimal);
-
-impl Money {
-    /// Explicit conversion boundary from the `f64` pricing math.
-    ///
-    /// Returns `None` for NaN and ±Inf so callers can surface
-
 /// A single option leg held by a wallet, as seen by the margin engine.
 ///
 /// `contracts` is signed: positive for long, negative for short. `strike`
@@ -207,21 +192,6 @@ fn option_value(option_type: &str, spot: f64, strike: f64, vol: f64) -> f64 {
     let time_value = spot * vol * (1.0 - moneyness).max(0.0);
     intrinsic + time_value
 }
-
-use rust_decimal::Decimal;
-use rust_decimal::RoundingStrategy;
-
-/// Fixed-point monetary amount backed by `rust_decimal::Decimal`.
-///
-/// Display uses banker's rounding; fees and collateral use
-/// round-against-the-user (see [`Money::round_against_user`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Money(Decimal);
-
-impl Money {
-    /// Explicit conversion boundary from the `f64` pricing math.
-    ///
-    /// Returns `None` for NaN and ±Inf so callers can surface
 
 use rust_decimal::Decimal;
 use rust_decimal::RoundingStrategy;
@@ -589,7 +559,5 @@ mod tests {
         }];
         assert!(RiskArrayMargin.exceeds_equity(&positions, 1.0));
         assert!(!RiskArrayMargin.exceeds_equity(&positions, 1e12));
-    }
-
     }
 }
