@@ -26,6 +26,7 @@ pub mod prices;
 pub mod rate_limit_key;
 pub mod request_id;
 pub mod secrets;
+pub mod settlement_notifications;
 pub mod signing;
 pub mod strategies;
 pub mod strkey;
