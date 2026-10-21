@@ -133,8 +133,7 @@ fn valid_shape(definition: &StrategyDefinition) -> bool {
             let leg = &definition.legs[0];
             leg.option_type == OptionType::Call
                 && leg.side == Side::Short
-                && definition.covered_units
-                    >= leg.contracts * definition.contract_multiplier
+                && definition.covered_units >= leg.contracts * definition.contract_multiplier
         }
         _ => false,
     }
@@ -230,9 +229,8 @@ pub async fn persist_strategy_bundle(
     definition: &StrategyDefinition,
     available_margin: f64,
 ) -> Result<f64, sqlx::Error> {
-    let required = validate_strategy(definition, available_margin).map_err(|error| {
-        sqlx::Error::Protocol(format!("strategy validation failed: {error:?}"))
-    })?;
+    let required = validate_strategy(definition, available_margin)
+        .map_err(|error| sqlx::Error::Protocol(format!("strategy validation failed: {error:?}")))?;
     let mut tx = pool.begin().await?;
     sqlx::query(
         "INSERT INTO atomic_strategy_orders
@@ -260,8 +258,10 @@ pub async fn persist_strategy_bundle(
              VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(order_id)
-        .bind(i64::try_from(index)
-            .map_err(|_| sqlx::Error::Protocol("too many strategy legs".into()))?)
+        .bind(
+            i64::try_from(index)
+                .map_err(|_| sqlx::Error::Protocol("too many strategy legs".into()))?,
+        )
         .bind(leg.option_type.as_str())
         .bind(leg.side.as_str())
         .bind(leg.strike)
@@ -279,7 +279,13 @@ mod tests {
     use super::*;
 
     fn leg(option_type: OptionType, side: Side, strike: f64, contracts: f64) -> StrategyLeg {
-        StrategyLeg { option_type, side, strike, contracts, premium: 1.0 }
+        StrategyLeg {
+            option_type,
+            side,
+            strike,
+            contracts,
+            premium: 1.0,
+        }
     }
 
     fn definition(kind: StrategyKind, legs: Vec<StrategyLeg>) -> StrategyDefinition {

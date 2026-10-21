@@ -3,8 +3,8 @@
 //! This module computes auditable backend instructions. The expiry keeper must
 //! still submit and confirm the corresponding on-chain settlement transaction.
 
-use sqlx::SqlitePool;
 use sha2::{Digest, Sha256};
+use sqlx::SqlitePool;
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,7 +100,10 @@ pub fn allocate_writers(
     }
 
     let mut seen = HashSet::with_capacity(writers.len());
-    if writers.iter().any(|writer| !seen.insert(&writer.position_id)) {
+    if writers
+        .iter()
+        .any(|writer| !seen.insert(&writer.position_id))
+    {
         return Err(AssignmentError::DuplicatePositionId);
     }
 
@@ -131,10 +134,13 @@ pub fn allocate_writers(
         .checked_sub(allocated)
         .ok_or(AssignmentError::ArithmeticOverflow)?;
     allocations.sort_by(|(left, _, left_rem), (right, _, right_rem)| {
-        right_rem
-            .cmp(left_rem)
-            .then_with(|| assignment_tiebreak(series_id, expiry, &left.position_id)
-                .cmp(&assignment_tiebreak(series_id, expiry, &right.position_id)))
+        right_rem.cmp(left_rem).then_with(|| {
+            assignment_tiebreak(series_id, expiry, &left.position_id).cmp(&assignment_tiebreak(
+                series_id,
+                expiry,
+                &right.position_id,
+            ))
+        })
     });
     for (_, assigned, _) in allocations.iter_mut().take(leftover as usize) {
         *assigned += 1;
@@ -246,8 +252,10 @@ pub async fn persist_confirmed_run(
         )
         .bind(&run.id)
         .bind(&decision.position_id)
-        .bind(i64::try_from(decision.exercised_contracts)
-            .map_err(|_| sqlx::Error::Protocol("exercise count overflow".into()))?)
+        .bind(
+            i64::try_from(decision.exercised_contracts)
+                .map_err(|_| sqlx::Error::Protocol("exercise count overflow".into()))?,
+        )
         .bind(decision.intrinsic_per_contract)
         .execute(&mut *tx)
         .await?;
@@ -260,8 +268,10 @@ pub async fn persist_confirmed_run(
         )
         .bind(&run.id)
         .bind(&assignment.position_id)
-        .bind(i64::try_from(assignment.assigned_contracts)
-            .map_err(|_| sqlx::Error::Protocol("assignment count overflow".into()))?)
+        .bind(
+            i64::try_from(assignment.assigned_contracts)
+                .map_err(|_| sqlx::Error::Protocol("assignment count overflow".into()))?,
+        )
         .execute(&mut *tx)
         .await?;
     }
@@ -295,23 +305,36 @@ mod tests {
     #[test]
     fn writer_allocation_is_pro_rata_bounded_and_reproducible() {
         let writers = vec![
-            ShortPosition { position_id: "a".into(), open_contracts: 2 },
-            ShortPosition { position_id: "b".into(), open_contracts: 4 },
-            ShortPosition { position_id: "c".into(), open_contracts: 6 },
+            ShortPosition {
+                position_id: "a".into(),
+                open_contracts: 2,
+            },
+            ShortPosition {
+                position_id: "b".into(),
+                open_contracts: 4,
+            },
+            ShortPosition {
+                position_id: "c".into(),
+                open_contracts: 6,
+            },
         ];
         let first = allocate_writers("series", "expiry", 6, &writers).unwrap();
         let second = allocate_writers("series", "expiry", 6, &writers).unwrap();
         assert_eq!(first, second);
-        assert_eq!(
-            first.iter().map(|a| a.assigned_contracts).sum::<u64>(),
-            6
-        );
+        assert_eq!(first.iter().map(|a| a.assigned_contracts).sum::<u64>(), 6);
         for assignment in &first {
-            let capacity = writers.iter().find(|w| w.position_id == assignment.position_id).unwrap().open_contracts;
+            let capacity = writers
+                .iter()
+                .find(|w| w.position_id == assignment.position_id)
+                .unwrap()
+                .open_contracts;
             assert!(assignment.assigned_contracts <= capacity);
         }
         assert_eq!(
-            first.iter().map(|a| (&*a.position_id, a.assigned_contracts)).collect::<Vec<_>>(),
+            first
+                .iter()
+                .map(|a| (&*a.position_id, a.assigned_contracts))
+                .collect::<Vec<_>>(),
             vec![("a", 1), ("b", 2), ("c", 3)]
         );
     }
@@ -319,8 +342,14 @@ mod tests {
     #[test]
     fn rejects_duplicate_positions_and_excessive_assignments() {
         let duplicate = vec![
-            ShortPosition { position_id: "same".into(), open_contracts: 1 },
-            ShortPosition { position_id: "same".into(), open_contracts: 1 },
+            ShortPosition {
+                position_id: "same".into(),
+                open_contracts: 1,
+            },
+            ShortPosition {
+                position_id: "same".into(),
+                open_contracts: 1,
+            },
         ];
         assert_eq!(
             allocate_writers("s", "e", 1, &duplicate),
@@ -331,7 +360,10 @@ mod tests {
                 "s",
                 "e",
                 3,
-                &[ShortPosition { position_id: "a".into(), open_contracts: 2 }]
+                &[ShortPosition {
+                    position_id: "a".into(),
+                    open_contracts: 2
+                }]
             ),
             Err(AssignmentError::InsufficientWriterCapacity)
         );

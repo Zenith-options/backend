@@ -49,7 +49,9 @@ async fn require_risk_admin(
     .fetch_optional(pool)
     .await?;
     if allowed.is_none() {
-        return Err(invalid("a stepped-up risk administrator session is required"));
+        return Err(invalid(
+            "a stepped-up risk administrator session is required",
+        ));
     }
     Ok(())
 }
@@ -140,12 +142,11 @@ pub async fn authorize_withdrawal(
 
     // Acquire SQLite's writer lock before reading the rolling sum so two
     // concurrent requests cannot both pass against the same stale total.
-    let locked = sqlx::query(
-        "UPDATE vault_withdrawal_policies SET frozen = frozen WHERE vault_id = ?",
-    )
-    .bind(vault_id)
-    .execute(&mut *tx)
-    .await?;
+    let locked =
+        sqlx::query("UPDATE vault_withdrawal_policies SET frozen = frozen WHERE vault_id = ?")
+            .bind(vault_id)
+            .execute(&mut *tx)
+            .await?;
     if locked.rows_affected() != 1 {
         return Err(invalid("vault withdrawal policy is not configured"));
     }
@@ -168,8 +169,7 @@ pub async fn authorize_withdrawal(
     .bind(wallet)
     .fetch_one(&mut *tx)
     .await?;
-    if latest_deposit.is_some_and(|deposit_at| !cooling_period_elapsed(deposit_at, now, policy.2))
-    {
+    if latest_deposit.is_some_and(|deposit_at| !cooling_period_elapsed(deposit_at, now, policy.2)) {
         return Err(invalid("deposit cooling-off period has not elapsed"));
     }
 
@@ -264,17 +264,17 @@ pub async fn set_vault_frozen(
     now: i64,
 ) -> Result<(), sqlx::Error> {
     if event_id.trim().is_empty() || reason.trim().is_empty() || now < 0 {
-        return Err(invalid("freeze event id, reason, and valid time are required"));
+        return Err(invalid(
+            "freeze event id, reason, and valid time are required",
+        ));
     }
     require_risk_admin(pool, admin_wallet, session_token).await?;
     let mut tx = pool.begin().await?;
-    let updated = sqlx::query(
-        "UPDATE vault_withdrawal_policies SET frozen = ? WHERE vault_id = ?",
-    )
-    .bind(if frozen { 1_i64 } else { 0_i64 })
-    .bind(vault_id)
-    .execute(&mut *tx)
-    .await?;
+    let updated = sqlx::query("UPDATE vault_withdrawal_policies SET frozen = ? WHERE vault_id = ?")
+        .bind(if frozen { 1_i64 } else { 0_i64 })
+        .bind(vault_id)
+        .execute(&mut *tx)
+        .await?;
     if updated.rows_affected() != 1 {
         return Err(invalid("vault withdrawal policy is not configured"));
     }

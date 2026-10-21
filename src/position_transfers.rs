@@ -43,7 +43,9 @@ async fn create_offer(
     .fetch_optional(&mut *tx)
     .await?;
     if owner.as_deref() != Some(from_wallet) {
-        return Err(invalid("position is not open and owned by the offer wallet"));
+        return Err(invalid(
+            "position is not open and owned by the offer wallet",
+        ));
     }
 
     let offer = sqlx::query_as::<_, TransferOffer>(
@@ -147,7 +149,11 @@ pub async fn apply_confirmed_transfer(
     .await?
     .ok_or_else(|| invalid("transfer offer is not open"))?;
 
-    if offer.to_wallet.as_deref().is_some_and(|wallet| wallet != recipient_wallet) {
+    if offer
+        .to_wallet
+        .as_deref()
+        .is_some_and(|wallet| wallet != recipient_wallet)
+    {
         return Err(invalid("recipient does not match bilateral offer"));
     }
     if offer.from_wallet == recipient_wallet {
