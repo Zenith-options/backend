@@ -15,6 +15,7 @@ use tower_http::trace::TraceLayer;
 pub mod alerts;
 pub mod auth;
 pub mod collateral;
+pub mod compliance;
 pub mod db;
 pub mod error;
 pub mod history;
