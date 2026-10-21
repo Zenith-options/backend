@@ -26,6 +26,7 @@ pub mod positions;
 pub mod prices;
 pub mod rate_limit_key;
 pub mod request_id;
+pub mod risk_stress;
 pub mod secrets;
 pub mod signing;
 pub mod strategies;
@@ -660,6 +661,7 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/portfolio/greeks",
             get(positions::get_portfolio_greeks),
         )
+        .route("/api/v1/risk/stress", post(risk_stress::stress_portfolios))
         .layer(PropagateRequestIdLayer::new(request_id_header()))
         .layer(TraceLayer::new_for_http())
         .layer(SetRequestIdLayer::new(
