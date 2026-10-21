@@ -24,6 +24,7 @@ pub mod models;
 pub mod payoff;
 pub mod positions;
 pub mod prices;
+pub mod protocol_fees;
 pub mod rate_limit_key;
 pub mod request_id;
 pub mod secrets;
