@@ -16,11 +16,13 @@ pub mod rpc;
 pub mod simulate;
 pub mod submit;
 pub mod tx_builder;
+pub mod sac_deposit;
 
 pub use horizon::{AccountResponse, BalanceLine, HorizonClient, HorizonError};
 pub use readiness::{check_wallet_readiness, ReadinessItem, ReadinessReport};
 pub use relayer::{FeeBumpRelayer, RelayerError, SponsorshipPolicy};
 pub use rpc::{LedgerEntryInfo, SorobanRpcClient};
+pub use sac_deposit::{SacAsset, SacDepositManager};
 pub mod simulate;
 pub mod submit;
 pub mod tx_builder;
