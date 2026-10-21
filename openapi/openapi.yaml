@@ -19,6 +19,7 @@ tags:
   - name: Strategies
   - name: Watchlist
   - name: Alerts
+  - name: Chain costs
 paths:
   /health:
     get:
@@ -680,12 +681,120 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/JsonOk"
+  /admin/chain-costs/settlements/{batch_id}:
+    get:
+      operationId: getSettlementChainCost
+      tags: [Chain costs]
+      security: [{ bearerAuth: [] }]
+      description: Net on-chain cost of one settlement batch, including failed attempts, by operation type.
+      parameters:
+        - { name: batch_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Cost of the batch.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ChainEntityCost" }
+        "404": { description: No cost events for this batch. }
+  /admin/chain-costs/daily:
+    get:
+      operationId: getDailyChainCost
+      tags: [Chain costs]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/ChainCostFrom"
+        - $ref: "#/components/parameters/ChainCostTo"
+      responses:
+        "200":
+          description: Net cost per UTC day.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ChainDailyCost" }
+        "400": { description: Empty range or range longer than 366 days. }
+  /admin/chain-costs/operations:
+    get:
+      operationId: getChainCostByOperation
+      tags: [Chain costs]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/ChainCostFrom"
+        - $ref: "#/components/parameters/ChainCostTo"
+      responses:
+        "200":
+          description: Cost distribution by operation type.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ChainOperationCost" }
+        "400": { description: Empty range or range longer than 366 days. }
+  /admin/chain-costs/grouped:
+    get:
+      operationId: getChainCostGrouped
+      tags: [Chain costs]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/ChainCostFrom"
+        - $ref: "#/components/parameters/ChainCostTo"
+        - { name: dimension, in: query, required: false, schema: { type: string, enum: [action, account, series], default: action } }
+      responses:
+        "200":
+          description: Cost grouped by business action, account or series.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    key: { type: string, nullable: true }
+                    tx_count: { type: integer }
+                    net_cost: { type: integer, description: stroops }
+        "400": { description: Empty range or range longer than 366 days. }
+  /admin/chain-costs/budgets:
+    get:
+      operationId: getChainBudgets
+      tags: [Chain costs]
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Current-period budget utilisation and guardrail state per category.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  budgets:
+                    type: array
+                    items: { $ref: "#/components/schemas/ChainBudgetStatus" }
+  /admin/chain-costs/metrics:
+    get:
+      operationId: getChainCostMetrics
+      tags: [Chain costs]
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Prometheus text exposition of budget utilisation, state, spend and rejections.
+          content:
+            text/plain: { schema: { type: string } }
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
   parameters:
+    ChainCostFrom:
+      name: from_ms
+      in: query
+      required: true
+      schema: { type: integer, description: Range start, epoch ms (inclusive). }
+    ChainCostTo:
+      name: to_ms
+      in: query
+      required: true
+      schema: { type: integer, description: Range end, epoch ms (exclusive). }
     Underlying:
       name: underlying
       in: query
@@ -853,3 +962,40 @@ components:
         underlying: { type: string }
         condition: { type: string, enum: [above, below] }
         target_price: { type: number }
+    ChainOperationCost:
+      type: object
+      properties:
+        operation: { type: string, enum: [submission, fee_bump, restore_footprint, extend_ttl, storage_write, upload_wasm] }
+        tx_count: { type: integer }
+        net_cost: { type: integer, description: Post-refund cost in stroops. }
+        rent_fee: { type: integer }
+        refund: { type: integer }
+    ChainEntityCost:
+      type: object
+      properties:
+        action: { type: string }
+        action_id: { type: string }
+        tx_count: { type: integer }
+        failed_tx_count: { type: integer }
+        net_cost: { type: integer }
+        unreconciled_count: { type: integer }
+        by_operation:
+          type: array
+          items: { $ref: "#/components/schemas/ChainOperationCost" }
+    ChainDailyCost:
+      type: object
+      properties:
+        day: { type: string, format: date }
+        tx_count: { type: integer }
+        net_cost: { type: integer }
+    ChainBudgetStatus:
+      type: object
+      properties:
+        category: { type: string, enum: [settlement_batch, vault_deposit, oracle_publish, keeper_run, emergency_pause, admin, other] }
+        period: { type: string, enum: [daily, weekly] }
+        period_start_ms: { type: integer }
+        limit_stroops: { type: integer }
+        spent: { type: integer }
+        reserved: { type: integer }
+        utilization_bps: { type: integer }
+        state: { type: string, enum: [ok, warn, hard_stop] }
