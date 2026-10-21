@@ -13,6 +13,7 @@ use crate::{black_scholes, AppState, BSInputs};
 pub const MAX_STRESS_SCENARIOS: usize = 2_500;
 const MIN_VOL: f64 = 0.01;
 const RISK_FREE_RATE: f64 = 0.05;
+const MONEY_SCALE: f64 = 10_000_000.0;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct StressScenario {
@@ -81,16 +82,25 @@ pub async fn stress_portfolios(
     .await
     .map_err(|error| db_error("load pooled positions for stress test", error))?;
 
-    let user_capital: f64 =
+    let user_capital_scaled: f64 =
         sqlx::query_scalar("SELECT balance FROM accounts WHERE wallet_address = ?")
             .bind(&wallet)
             .fetch_one(&state.db)
             .await
             .map_err(|error| db_error("load account capital for stress test", error))?;
-    let pooled_capital: f64 = sqlx::query_scalar("SELECT COALESCE(SUM(balance), 0.0) FROM accounts")
-        .fetch_one(&state.db)
-        .await
-        .map_err(|error| db_error("load pooled capital for stress test", error))?;
+    let pooled_capital_scaled: f64 =
+        sqlx::query_scalar("SELECT COALESCE(TOTAL(balance), 0.0) FROM accounts")
+            .fetch_one(&state.db)
+            .await
+            .map_err(|error| db_error("load pooled capital for stress test", error))?;
+    let user_capital = user_capital_scaled / MONEY_SCALE;
+    let pooled_capital = pooled_capital_scaled / MONEY_SCALE;
+    if !user_capital.is_finite() || !pooled_capital.is_finite() {
+        return Err(AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "account capital contains a non-finite value",
+        ));
+    }
 
     let portfolio_legs = make_legs(&state, &user_positions)?;
     let pooled_legs = make_legs(&state, &all_positions)?;
@@ -125,6 +135,9 @@ fn validate_request(request: &StressRequest) -> Result<(), AppError> {
 
     for scenario in &request.scenarios {
         if scenario.name.trim().is_empty()
+            || scenario.name.len() > 64
+            || scenario.spot_shocks_pct.len() > 64
+            || scenario.vol_shocks_abs.len() > 64
             || !scenario.days_forward.is_finite()
             || !(0.0..=36_500.0).contains(&scenario.days_forward)
             || scenario
@@ -191,16 +204,32 @@ fn make_legs(state: &AppState, positions: &[Position]) -> Result<Vec<StressLeg>,
             } else {
                 -1.0
             };
+            let strike = position.strike.to_f64();
+            let quantity = position.contracts.to_f64() * direction;
+            if !spot.is_finite()
+                || spot <= 0.0
+                || !vol.is_finite()
+                || vol <= 0.0
+                || !strike.is_finite()
+                || strike <= 0.0
+                || !quantity.is_finite()
+                || quantity == 0.0
+            {
+                return Err(AppError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!("invalid market or position data for {}", position.underlying),
+                ));
+            }
             Ok(StressLeg {
                 underlying: position.underlying.clone(),
                 spot,
-                strike: position.strike.to_f64(),
+                strike,
                 time_to_expiry: crate::positions::time_to_expiry_years(
                     &position.expires_at,
                     now,
                 ),
                 vol,
-                quantity: position.contracts.to_f64() * direction,
+                quantity,
                 is_call: position.option_type == "call",
             })
         })
