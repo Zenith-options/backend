@@ -659,6 +659,11 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/portfolio/greeks",
             get(positions::get_portfolio_greeks),
         )
+        // Failed-settlement diagnostics for operators (Bearer ZENITH_ADMIN_TOKEN).
+        .nest_service(
+            "/api/v1/admin/tx-forensics",
+            soroban::forensics::router(state.db.clone(), std::env::var("ZENITH_ADMIN_TOKEN").ok()),
+        )
         .layer(PropagateRequestIdLayer::new(request_id_header()))
         .layer(TraceLayer::new_for_http())
         .layer(SetRequestIdLayer::new(
