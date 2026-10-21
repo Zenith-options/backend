@@ -23,6 +23,7 @@ pub mod math_fixed;
 pub mod models;
 pub mod payoff;
 pub mod privacy;
+pub mod settlement_reports;
 pub mod positions;
 pub mod prices;
 pub mod rate_limit_key;
@@ -665,6 +666,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/privacy/erasure",
             axum::routing::delete(privacy::erase),
+        )
+        .route(
+            "/api/v1/settlement/statements",
+            get(settlement_reports::statement),
         )
         .layer(PropagateRequestIdLayer::new(request_id_header()))
         .layer(TraceLayer::new_for_http())

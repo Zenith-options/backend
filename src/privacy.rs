@@ -37,6 +37,17 @@ struct PositionExport {
     closed_at: Option<String>,
 }
 
+#[derive(Serialize, FromRow)]
+struct SettlementExport {
+    id: String,
+    event_type: String,
+    occurred_at: i64,
+    series_id: Option<String>,
+    amount_stroops: i64,
+    chain_tx_hash: Option<String>,
+    description: String,
+}
+
 async fn session_wallet(pool: &SqlitePool, headers: &HeaderMap) -> Result<String, StatusCode> {
     let token = headers
         .get(axum::http::header::AUTHORIZATION)
@@ -80,12 +91,23 @@ pub async fn export(
     .fetch_all(&state.db)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let settlements: Vec<SettlementExport> = sqlx::query_as(
+        "SELECT id, event_type, occurred_at, series_id, amount_stroops,
+                chain_tx_hash, description
+           FROM settlement_activity WHERE wallet_address = ?1
+          ORDER BY occurred_at, id",
+    )
+    .bind(&wallet)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(serde_json::json!({
         "schema_version": 1,
         "wallet_anchor": wallet,
         "account": account,
         "positions": positions,
+        "settlement_activity": settlements,
     })))
 }
 
