@@ -17,6 +17,7 @@ pub mod auth;
 pub mod collateral;
 pub mod db;
 pub mod error;
+pub mod expiry_assignment;
 pub mod history;
 pub mod math_fixed;
 pub mod models;
