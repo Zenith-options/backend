@@ -27,6 +27,7 @@ pub mod rate_limit_key;
 pub mod request_id;
 pub mod secrets;
 pub mod signing;
+pub mod soroban;
 pub mod strategies;
 pub mod strkey;
 pub mod watchlist;
