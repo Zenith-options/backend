@@ -27,6 +27,7 @@ pub mod positions;
 pub mod prices;
 pub mod rate_limit_key;
 pub mod request_id;
+pub mod retention;
 pub mod secrets;
 pub mod shadow;
 pub mod signing;

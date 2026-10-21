@@ -94,6 +94,12 @@ expiry comparison; `shadow::cutover_readiness` turns that into a go/no-go
 for live settlement, and live mode keeps comparing to catch contract
 regressions. See `docs/shadow-mode.md`.
 
+`src/retention.rs` keeps the hot database bounded: per-table policies move
+expired indexer events, projections and other high-volume rows into
+sha256-checksummed JSONL archives (recorded in `archive_manifests`) before
+deleting them, while settlement records of truth are never purged. See
+`docs/data-retention.md`.
+
 
 ## Endpoints
 
