@@ -137,6 +137,11 @@ requiring a session — see `mutation_rate_limited_routes()` in `lib.rs`.
 | `GET /api/v1/strategies` | List multi-leg strategies with aggregate realized/unrealized P&L |
 | `GET /api/v1/strategies/:id` | One strategy's legs + aggregate P&L |
 | `POST /api/v1/strategies/:id/close` | Close every currently-open leg of a strategy atomically |
+| `POST /api/v1/rfqs` | Create a private, wallet-scoped RFQ for invited counterparties |
+| `GET /api/v1/rfqs/:id` | Read an RFQ and visible quotes (requester or invited maker) |
+| `POST /api/v1/rfqs/:id/quotes` | Submit or update a quote as an invited maker |
+| `POST /api/v1/rfqs/:id/accept` | Accept one quote as an off-chain agreement |
+| `POST /api/v1/rfqs/:id/cancel` | Cancel an open RFQ |
 
 ### Watchlist & alerts **auth**
 
@@ -150,6 +155,11 @@ requiring a session — see `mutation_rate_limited_routes()` in `lib.rs`.
 Alerts are checked against spot every 10s by a background task; a
 triggered alert stays in the table (visible via GET) rather than being
 deleted.
+
+RFQ acceptance currently records negotiation state only; it does not
+transfer assets or positions. SEP-7 URI construction and the Soroban
+authorization plan types are groundwork, not a live signing/submission or
+delivery-versus-payment pipeline. See [docs/stellar-settlement.md](docs/stellar-settlement.md).
 
 Every response carries an `x-request-id` header — a fresh UUIDv4 if the
 request didn't already have one, or the caller's own value echoed back

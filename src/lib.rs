@@ -14,6 +14,7 @@ use tower_http::trace::TraceLayer;
 
 pub mod alerts;
 pub mod auth;
+pub mod chain;
 pub mod collateral;
 pub mod db;
 pub mod error;
@@ -23,8 +24,10 @@ pub mod models;
 pub mod payoff;
 pub mod positions;
 pub mod prices;
+pub mod quotes;
 pub mod rate_limit_key;
 pub mod request_id;
+pub mod rfq;
 pub mod secrets;
 pub mod signing;
 pub mod strategies;
@@ -613,6 +616,10 @@ fn mutation_rate_limited_routes() -> Router<AppState> {
             "/api/v1/strategies/:id/close",
             post(strategies::close_strategy),
         )
+        .route("/api/v1/rfqs", post(rfq::create_rfq))
+        .route("/api/v1/rfqs/:id/quotes", post(rfq::submit_quote))
+        .route("/api/v1/rfqs/:id/accept", post(rfq::accept_quote))
+        .route("/api/v1/rfqs/:id/cancel", post(rfq::cancel_rfq))
         .layer(GovernorLayer { config })
 }
 
@@ -636,6 +643,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/stats", get(get_protocol_stats))
         .merge(auth_rate_limited_routes())
         .merge(mutation_rate_limited_routes())
+        .route("/api/v1/rfqs/:id", get(rfq::get_rfq))
         .route("/api/v1/auth/me", get(auth::get_me))
         .route("/api/v1/account", get(positions::get_account))
         .route("/api/v1/positions", get(positions::list_positions))

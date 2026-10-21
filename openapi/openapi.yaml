@@ -17,6 +17,7 @@ tags:
   - name: Trading
   - name: Portfolio
   - name: Strategies
+  - name: RFQ
   - name: Watchlist
   - name: Alerts
 paths:
@@ -504,6 +505,72 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/JsonOk"
+  /api/v1/rfqs:
+    post:
+      operationId: createRfqV1
+      tags: [RFQ]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateRfqRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonOk"
+  /api/v1/rfqs/{id}:
+    get:
+      operationId: getRfqV1
+      tags: [RFQ]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonOk"
+  /api/v1/rfqs/{id}/quotes:
+    post:
+      operationId: submitRfqQuoteV1
+      tags: [RFQ]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubmitRfqQuoteRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonOk"
+  /api/v1/rfqs/{id}/accept:
+    post:
+      operationId: acceptRfqQuoteV1
+      tags: [RFQ]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AcceptRfqQuoteRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonOk"
+  /api/v1/rfqs/{id}/cancel:
+    post:
+      operationId: cancelRfqV1
+      tags: [RFQ]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonOk"
   /api/v2/strategies/{id}/close:
     post:
       operationId: closeStrategyV2
@@ -853,3 +920,28 @@ components:
         underlying: { type: string }
         condition: { type: string, enum: [above, below] }
         target_price: { type: number }
+    CreateRfqRequest:
+      type: object
+      required: [series, side, contracts, counterparties]
+      properties:
+        series: { type: string, maxLength: 128 }
+        side: { type: string, enum: [buy, sell] }
+        contracts: { type: integer, minimum: 1 }
+        counterparties:
+          type: array
+          minItems: 1
+          maxItems: 20
+          uniqueItems: true
+          items: { type: string }
+        ttl_secs: { type: integer, minimum: 30, maximum: 3600, default: 300 }
+    SubmitRfqQuoteRequest:
+      type: object
+      required: [premium_microusd]
+      properties:
+        premium_microusd: { type: integer, minimum: 1 }
+        ttl_secs: { type: integer, minimum: 30, maximum: 3600, default: 300 }
+    AcceptRfqQuoteRequest:
+      type: object
+      required: [quote_id]
+      properties:
+        quote_id: { type: string, format: uuid }
