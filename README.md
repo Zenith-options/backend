@@ -150,8 +150,9 @@ requiring a session — see `mutation_rate_limited_routes()` in `lib.rs`.
 `GET /admin/settlement` renders the current settlement queue, stuck chain
 transactions, account margin breaches, vault reserve coverage, and keeper
 liveness. Set `ZENITH_OPERATOR_TOKEN` and send
-`Authorization: Bearer <token>`. Reserve coverage is shown as unavailable
-until a `vault_reserve_snapshots` observation has been recorded.
+`Authorization: Bearer <token>`. On-chain coverage is used when a
+`vault_reserve_snapshots` observation exists; otherwise the page shows a
+clearly labelled paper-ledger estimate when account collateral exists.
 
 ### Watchlist & alerts **auth**
 

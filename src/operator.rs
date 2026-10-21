@@ -1,5 +1,5 @@
 use axum::extract::State;
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use hmac::{Hmac, Mac};
 use serde::Serialize;
@@ -18,6 +18,7 @@ pub struct SettlementHealth {
     pub stuck_transactions: i64,
     pub margin_breaches: i64,
     pub vault_coverage: Option<f64>,
+    pub vault_coverage_source: String,
     pub vault_snapshot_age_seconds: Option<i64>,
     pub keeper_live: bool,
     pub keeper_last_success_age_seconds: Option<i64>,
@@ -27,7 +28,8 @@ pub async fn settlement_dashboard(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Response {
-    match authorize_operator(&headers) {
+    let expected_token = std::env::var("ZENITH_OPERATOR_TOKEN").ok();
+    match authorize_operator(&headers, expected_token.as_deref()) {
         Ok(()) => {}
         Err(status) => return status.into_response(),
     }
@@ -41,9 +43,11 @@ pub async fn settlement_dashboard(
     }
 }
 
-fn authorize_operator(headers: &HeaderMap) -> Result<(), StatusCode> {
-    let expected = std::env::var("ZENITH_OPERATOR_TOKEN")
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+fn authorize_operator(
+    headers: &HeaderMap,
+    expected: Option<&str>,
+) -> Result<(), StatusCode> {
+    let expected = expected.ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     if expected.is_empty() {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
@@ -101,6 +105,12 @@ pub async fn load_settlement_health(
     .fetch_optional(&state.db)
     .await?;
 
+    let (paper_equity, paper_collateral): (f64, f64) = sqlx::query_as(
+        "SELECT TOTAL(balance), TOTAL(collateral_locked) FROM accounts",
+    )
+    .fetch_one(&state.db)
+    .await?;
+
     let keeper_live: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM leases
          WHERE expires_at > CAST(strftime('%s', 'now') AS INTEGER)",
@@ -116,25 +126,42 @@ pub async fn load_settlement_health(
     .fetch_one(&state.db)
     .await?;
 
-    let (vault_coverage, vault_snapshot_age_seconds) = match vault_snapshot {
-        Some((collateral, liabilities, age)) if liabilities > 0.0 => {
-            (Some(collateral / liabilities), Some(age))
-        }
-        Some((_, _, age)) => (None, Some(age)),
-        None => (None, None),
-    };
+    let (vault_coverage, vault_coverage_source, vault_snapshot_age_seconds) =
+        select_vault_coverage(vault_snapshot, paper_equity, paper_collateral);
 
     Ok(SettlementHealth {
         pending_batches,
         stuck_transactions,
         margin_breaches,
         vault_coverage,
+        vault_coverage_source,
         vault_snapshot_age_seconds,
         keeper_live: keeper_live > 0
             && keeper_last_success_age_seconds
                 .is_some_and(|age| age <= KEEPER_STALE_AFTER_SECONDS),
         keeper_last_success_age_seconds,
     })
+}
+
+fn select_vault_coverage(
+    vault_snapshot: Option<(f64, f64, i64)>,
+    paper_equity: f64,
+    paper_collateral: f64,
+) -> (Option<f64>, String, Option<i64>) {
+    match vault_snapshot {
+        Some((collateral, liabilities, age)) if liabilities > 0.0 => (
+            Some(collateral / liabilities),
+            "on-chain reserve snapshot".into(),
+            Some(age),
+        ),
+        Some((_, _, age)) => (None, "on-chain snapshot has no liabilities".into(), Some(age)),
+        None if paper_collateral > 0.0 => (
+            Some((paper_equity / paper_collateral).max(0.0)),
+            "paper ledger estimate".into(),
+            None,
+        ),
+        None => (None, "no reserve data".into(), None),
+    }
 }
 
 fn render_dashboard(health: &SettlementHealth) -> String {
@@ -144,8 +171,8 @@ fn render_dashboard(health: &SettlementHealth) -> String {
         .unwrap_or_else(|| "unavailable".into());
     let coverage_age = health
         .vault_snapshot_age_seconds
-        .map(|age| format!("{age}s old"))
-        .unwrap_or_else(|| "no on-chain reserve snapshot".into());
+        .map(|age| format!("{}; {age}s old", health.vault_coverage_source))
+        .unwrap_or_else(|| health.vault_coverage_source.clone());
     let keeper_age = health
         .keeper_last_success_age_seconds
         .map(|age| format!("{age}s ago"))
@@ -189,19 +216,48 @@ mod tests {
             stuck_transactions: 1,
             margin_breaches: 3,
             vault_coverage: None,
+            vault_coverage_source: "no reserve data".into(),
             vault_snapshot_age_seconds: None,
             keeper_live: false,
             keeper_last_success_age_seconds: None,
         });
         assert!(html.contains("2</td><td>Keeper jobs"));
         assert!(html.contains("unavailable"));
-        assert!(html.contains("no on-chain reserve snapshot"));
+        assert!(html.contains("no reserve data"));
         assert!(html.contains("stale"));
     }
 
     #[test]
     fn operator_auth_rejects_missing_or_wrong_bearer_header() {
         let headers = HeaderMap::new();
-        assert_eq!(authorize_operator(&headers), Err(StatusCode::SERVICE_UNAVAILABLE));
+        assert_eq!(
+            authorize_operator(&headers, None),
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        );
+        let wrong = HeaderMap::from_iter([(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer wrong"),
+        )]);
+        assert_eq!(
+            authorize_operator(&wrong, Some("expected")),
+            Err(StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    #[test]
+    fn operator_auth_accepts_configured_bearer_token() {
+        let headers = HeaderMap::from_iter([(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer expected"),
+        )]);
+        assert_eq!(authorize_operator(&headers, Some("expected")), Ok(()));
+    }
+
+    #[test]
+    fn paper_ledger_coverage_is_labelled_as_an_estimate() {
+        let (coverage, source, age) = select_vault_coverage(None, 250.0, 100.0);
+        assert_eq!(coverage, Some(2.5));
+        assert_eq!(source, "paper ledger estimate");
+        assert_eq!(age, None);
     }
 }
