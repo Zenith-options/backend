@@ -16,8 +16,10 @@ pub mod alerts;
 pub mod auth;
 pub mod collateral;
 pub mod db;
+pub mod dr;
 pub mod error;
 pub mod history;
+pub mod insurance;
 pub mod math_fixed;
 pub mod models;
 pub mod payoff;
@@ -25,7 +27,9 @@ pub mod positions;
 pub mod prices;
 pub mod rate_limit_key;
 pub mod request_id;
+pub mod retention;
 pub mod secrets;
+pub mod shadow;
 pub mod signing;
 pub mod strategies;
 pub mod strkey;
@@ -634,6 +638,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/chain", get(get_chain))
         .route("/api/v1/expiries/:underlying", get(get_expiry_calendar))
         .route("/api/v1/stats", get(get_protocol_stats))
+        .route("/api/v1/insurance/coverage", get(insurance::get_coverage))
         .merge(auth_rate_limited_routes())
         .merge(mutation_rate_limited_routes())
         .route("/api/v1/auth/me", get(auth::get_me))

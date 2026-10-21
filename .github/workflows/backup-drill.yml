@@ -132,3 +132,11 @@ jobs:
           LITESTREAM_CONFIG: /tmp/litestream-ci.yml
           LITESTREAM_ACCESS_KEY_ID: testaccesskey
           LITESTREAM_SECRET_ACCESS_KEY: testsecretkey
+
+      # Second backup layer: a backup.sh snapshot must restore and validate
+      # on its own, without Litestream.
+      - name: Snapshot backup and restore drill
+        run: |
+          ./scripts/backup.sh /tmp/zenithdb/zenith.db /tmp/zenith-snapshots
+          SNAP="$(ls -1 /tmp/zenith-snapshots/zenith-*.db.gz | tail -1)"
+          ./scripts/restore.sh "$SNAP" /tmp/zenith-snapshot-restore.db
