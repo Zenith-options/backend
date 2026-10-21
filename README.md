@@ -88,6 +88,12 @@ reserve as far as the reserve allows, and keeps the rest open until it's
 covered or explicitly written off. `GET /api/v1/insurance/coverage`
 publishes the reserve's coverage ratio. See `docs/insurance-reserve.md`.
 
+`SETTLEMENT_MODE=shadow` runs the on-chain settlement path next to the
+off-chain engine by simulation only and records every margin, payoff and
+expiry comparison; `shadow::cutover_readiness` turns that into a go/no-go
+for live settlement, and live mode keeps comparing to catch contract
+regressions. See `docs/shadow-mode.md`.
+
 
 ## Endpoints
 
