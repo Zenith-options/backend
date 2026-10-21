@@ -36,6 +36,14 @@ hmac = "0.12"
 sha2 = "0.10"
 async-trait = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+url = "2"
+rust_decimal = { version = "1", features = ["macros", "serde"] }
+rust_decimal_macros = "1"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+redis = "0.27"
+prometheus = "0.13"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

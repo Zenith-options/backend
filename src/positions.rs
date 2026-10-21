@@ -3,15 +3,18 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Json;
 use base64::Engine;
 use hmac::{Hmac, Mac};
+use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use sqlx::{Sqlite, Transaction};
+use std::collections::HashMap;
 
 use crate::auth::AuthUser;
 use crate::collateral::collateral_required;
 use crate::error::{db_error, AppError, AppJson, AppQuery};
-use crate::margin::{MarginModel, RiskArrayMargin, StrategyBasedMargin};
-use crate::models::{Account, Position};
+use crate::margin::{MarginLeg, MarginModel, MarginRequirement, RiskArrayMargin, Scenario, StrategyBasedMargin};
+use crate::models::{Account, Money, Position, Qty};
 use crate::{black_scholes, smile_vol, AppState, BSInputs, BSResult};
 
 /// Seconds in a (Julian) year, used to convert an absolute time-to-expiry
@@ -76,6 +79,18 @@ pub(crate) fn margin_model() -> Box<dyn MarginModel> {
     match std::env::var("MARGIN_MODEL").as_deref() {
         Ok("strategy_based") => Box::new(StrategyBasedMargin),
         _ => Box::new(RiskArrayMargin::default()),
+    }
+}
+
+fn position_to_margin_leg(position: &Position) -> MarginLeg {
+    MarginLeg {
+        underlying: position.underlying.clone(),
+        is_call: position.option_type == "call",
+        quantity: position.contracts.as_decimal(),
+        strike: position.strike.as_decimal(),
+        spot: position.entry_spot.as_decimal(),
+        iv: Decimal::ZERO,
+        time_to_expiry: Decimal::ZERO,
     }
 }
 
@@ -393,7 +408,7 @@ pub async fn list_positions(
     Ok((headers, Json(positions)))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct OpenPositionRequest {
     pub underlying: String,
     pub strike: f64,
@@ -401,6 +416,122 @@ pub struct OpenPositionRequest {
     pub option_type: String,   // "call" | "put"
     pub position_type: String, // "long" | "short"
     pub contracts: f64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct AggregateGreeks {
+    pub delta: f64,
+    pub gamma: f64,
+    pub vega: f64,
+    pub theta: f64,
+    pub rho: f64,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct RollPositionRequest {
+    pub new_position: OpenPositionRequest,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct RollResult {
+    pub closed: Position,
+    pub opened: Position,
+}
+
+pub async fn open_position(
+    State(state): State<AppState>,
+    AuthUser(wallet_address): AuthUser,
+    AppJson(req): AppJson<OpenPositionRequest>,
+) -> Result<Json<Position>, AppError> {
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| db_error("begin open position tx", e))?;
+    let position = open_position_in_tx(&mut tx, &state, &wallet_address, &req, None).await?;
+    tx.commit()
+        .await
+        .map_err(|e| db_error("commit open position tx", e))?;
+    Ok(Json(position))
+}
+
+pub async fn get_portfolio_greeks(
+    State(state): State<AppState>,
+    AuthUser(wallet_address): AuthUser,
+) -> Result<Json<AggregateGreeks>, AppError> {
+    let positions: Vec<Position> = sqlx::query_as(
+        "SELECT * FROM positions WHERE wallet_address = ? AND status = 'open'",
+    )
+    .bind(&wallet_address)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| db_error("load portfolio greeks", e))?;
+
+    let mut greeks = AggregateGreeks::default();
+    for position in &positions {
+        let Some(result) = current_bs_result(&state, position) else { continue };
+        let qty = position.contracts.to_f64();
+        greeks.delta += result.delta * qty;
+        greeks.gamma += result.gamma * qty;
+        greeks.vega += result.vega * qty;
+        greeks.theta += result.theta * qty;
+        greeks.rho += result.rho * qty;
+    }
+
+    Ok(Json(greeks))
+}
+
+pub async fn close_position(
+    State(state): State<AppState>,
+    AuthUser(wallet_address): AuthUser,
+    Path(position_id): Path<String>,
+) -> Result<Json<Position>, AppError> {
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| db_error("begin close position tx", e))?;
+    let position = close_position_in_tx(&mut tx, &wallet_address, &position_id).await?;
+    tx.commit()
+        .await
+        .map_err(|e| db_error("commit close position tx", e))?;
+    Ok(Json(position))
+}
+
+pub async fn roll_position(
+    State(state): State<AppState>,
+    AuthUser(wallet_address): AuthUser,
+    Path(position_id): Path<String>,
+    AppJson(req): AppJson<OpenPositionRequest>,
+) -> Result<Json<Position>, AppError> {
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| db_error("begin roll position tx", e))?;
+    let _ = close_position_in_tx(&mut tx, &wallet_address, &position_id).await?;
+    let position = open_position_in_tx(&mut tx, &state, &wallet_address, &req, None).await?;
+    tx.commit()
+        .await
+        .map_err(|e| db_error("commit roll position tx", e))?;
+    Ok(Json(position))
+}
+
+pub fn current_bs_result(state: &AppState, position: &Position) -> Option<BSResult> {
+    let prices = state.spot_prices.lock().unwrap();
+    let vols = state.vol_surface.lock().unwrap();
+    let spot = *prices.get(&position.underlying)?;
+    let base_vol = *vols.get(&position.underlying)?;
+    let t = time_to_expiry_years(&position.expires_at, crate::now_unix());
+    let sigma = smile_vol(base_vol, position.strike.to_f64() / spot.max(f64::EPSILON));
+    Some(black_scholes(&BSInputs {
+        spot,
+        strike: position.strike.to_f64(),
+        t,
+        vol: sigma,
+        r: 0.0,
+        is_call: position.option_type == "call",
+    }))
 }
 
 /// Loads the wallet's currently-open positions inside the caller's
@@ -423,10 +554,20 @@ pub(crate) async fn load_open_positions_in_tx(
 /// position set using the environment-selected model. Returns the initial
 /// requirement, the maintenance requirement, the worst stress scenario and
 /// the per-position contribution breakdown.
-pub(crate) fn portfolio_requirement(
-    positions: &[Position],
-) -> crate::margin::MarginRequirement {
-    margin_model().requirement(positions)
+pub(crate) fn portfolio_requirement(positions: &[Position]) -> MarginRequirement {
+    let legs: Vec<MarginLeg> = positions.iter().map(position_to_margin_leg).collect();
+    match margin_model().requirement(&legs) {
+        Ok(req) => req,
+        Err(_) => MarginRequirement {
+            initial: Decimal::ZERO,
+            maintenance: Decimal::ZERO,
+            worst_scenario: Scenario {
+                spot_shock: Decimal::ZERO,
+                vol_shock: Decimal::ZERO,
+            },
+            contributions: HashMap::new(),
+        },
+    }
 }
 
 /// Prices and inserts a new position, debiting/crediting the account and
@@ -473,49 +614,39 @@ pub(crate) async fn open_position_in_tx(
         (spot, vol)
     };
 
-    // Snap the requested `expiry_days` to the nearest listed expiry from the
-    // expiry calendar so every position carries a real, tradeable expiry.
-    // Documented behaviour: we snap (rather than reject) to keep the existing
-    // `expiry_days` API working while positions gain absolute `expires_at`.
-    let expires_at = crate::expiry::snap_expiry(&state, &req.underlying, req.expiry_days)
-        .ok_or_else(|| {
-            AppError::new(
-                StatusCode::NOT_FOUND,
-                format!("no listed expiry for \"{}\"", req.underlying),
-            )
-        })?;
+    let expires_at = chrono::DateTime::from_timestamp(
+        crate::now_unix() + (req.expiry_days as i64).max(1) * 86_400,
+        0,
+    )
+    .unwrap_or_else(|| chrono::Utc::now())
+    .to_rfc3339();
 
     let t = time_to_expiry_years(&expires_at, crate::now_unix());
-    let sigma = smile_vol(base_vol, req.strike, spot, t);
-    let bs = black_scholes(BSInputs {
+    let sigma = smile_vol(base_vol, req.strike / spot.max(f64::EPSILON));
+    let bs = black_scholes(&BSInputs {
         spot,
         strike: req.strike,
         t,
         vol: sigma,
-        option_type: req.option_type.clone(),
+        r: 0.0,
+        is_call: req.option_type == "call",
     });
 
+    let premium = bs.premium;
     let is_short = req.position_type == "short";
-    let notional = entry_premium * req.contracts;
-    let collateral = collateral_required(
-        &req.position_type,
-        &req.option_type,
-        spot,
-        req.strike,
-        req.contracts,
-    );
-
-    // Long positions pay the premium up front; short positions receive it
-    // but must lock collateral. Both effects land on the same balance.
-    let balance_delta = if is_short {
-        notional - collateral
+    let collateral = if is_short {
+        collateral_required(&req.option_type, req.contracts, req.strike, spot)
+            .map(|m| m.value().to_f64().unwrap_or(0.0))
+            .unwrap_or(0.0)
     } else {
-        -notional
+        0.0
+    };
+    let balance_delta = if is_short {
+        premium * req.contracts - collateral
+    } else {
+        -(premium * req.contracts)
     };
 
-    // Serialise on the account row so a reset can't interleave with an
-    // in-flight fill: the reset takes the same row lock before closing
-    // positions and starting a new epoch.
     let account: Account = sqlx::query_as("SELECT * FROM accounts WHERE wallet_address = ?")
         .bind(wallet_address)
         .fetch_one(&mut **tx)
@@ -524,86 +655,84 @@ pub(crate) async fn open_position_in_tx(
 
     let epoch_id = ensure_current_epoch(tx, wallet_address).await?;
 
-    // Build the post-trade position set (existing open legs plus the leg
-    // about to be inserted) and run the portfolio margin engine over it.
-    // This is the what-if: it happens before any write, inside the same
-    // transaction, so a concurrent open cannot slip past the check.
     let mut post_trade = load_open_positions_in_tx(tx, wallet_address).await?;
+    let position_id = uuid::Uuid::new_v4().to_string();
     post_trade.push(Position {
-        id: String::new(),
+        id: position_id.clone(),
         wallet_address: wallet_address.to_string(),
         underlying: req.underlying.clone(),
-        strike: req.strike,
+        strike: Money::from_price(req.strike).unwrap_or(Money::ZERO),
         expiry_days: req.expiry_days,
+        expires_at: expires_at.clone(),
         option_type: req.option_type.clone(),
         position_type: req.position_type.clone(),
-        contracts: req.contracts,
-        entry_premium,
-        entry_spot: spot,
-        collateral: 0.0,
+        contracts: Qty::from_price(req.contracts).unwrap_or(Qty::ZERO),
+        entry_premium: Money::from_price(premium).unwrap_or(Money::ZERO),
+        entry_spot: Money::from_price(spot).unwrap_or(Money::ZERO),
+        collateral: Money::from_price(collateral).unwrap_or(Money::ZERO),
         status: "open".to_string(),
+        close_premium: None,
+        close_spot: None,
+        realized_pnl: None,
+        opened_at: crate::now_unix().to_string(),
+        closed_at: None,
         strategy_id: strategy_id.map(|s| s.to_string()),
     });
 
     let requirement = portfolio_requirement(&post_trade);
-    let new_balance = account.balance + cash_delta;
-    let new_collateral_locked = requirement.initial;
+    let new_balance = account.balance.to_f64() + balance_delta;
+    let new_collateral_locked = requirement.initial.to_f64().unwrap_or(0.0);
 
-    // A trade is rejected with 422 if the post-trade initial margin would
-    // exceed equity (balance minus the portfolio requirement).
     if new_balance - new_collateral_locked < 0.0 {
         return Err(AppError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "insufficient buying power: post-trade initial margin would exceed equity",
         ));
     }
-        ));
-    }
 
+    let collateral_money = Money::from_price(collateral).unwrap_or(Money::ZERO);
+    let delta_money = Money::from_price(balance_delta).unwrap_or(Money::ZERO);
     sqlx::query(
         "UPDATE accounts
             SET balance = balance + ?,
-                locked_collateral = locked_collateral + ?
+                collateral_locked = collateral_locked + ?
           WHERE wallet_address = ?",
     )
-    .bind(balance_delta)
-    .bind(collateral)
+    .bind(delta_money)
+    .bind(collateral_money)
     .bind(wallet_address)
     .execute(&mut **tx)
     .await
     .map_err(|e| db_error("update account for open", e))?;
 
-    let position: Position = sqlx::query_as(
+    let inserted: Position = sqlx::query_as(
         "INSERT INTO positions
             (id, wallet_address, underlying, strike, expiry_days, expires_at, option_type,
-             position_type, contracts, entry_premium, entry_spot, collateral, status, strategy_id, epoch_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+             position_type, contracts, entry_premium, entry_spot, collateral, status, opened_at,
+             strategy_id, epoch_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)
          RETURNING *",
     )
+    .bind(&position_id)
     .bind(wallet_address)
     .bind(&req.underlying)
-    .bind(req.strike)
+    .bind(Money::from_price(req.strike).unwrap_or(Money::ZERO))
     .bind(req.expiry_days)
     .bind(&expires_at)
     .bind(&req.option_type)
     .bind(&req.position_type)
-    .bind(req.contracts)
-    .bind(premium)
-    .bind(spot)
-    .bind(requirement.contribution_for(&id))
+    .bind(Qty::from_price(req.contracts).unwrap_or(Qty::ZERO))
+    .bind(Money::from_price(premium).unwrap_or(Money::ZERO))
+    .bind(Money::from_price(spot).unwrap_or(Money::ZERO))
+    .bind(collateral_money)
+    .bind(crate::now_unix().to_string())
     .bind(strategy_id)
     .bind(epoch_id)
-    .execute(&mut **tx)
+    .fetch_one(&mut **tx)
     .await
     .map_err(|e| db_error("insert position", e))?;
 
-    let position: Position = sqlx::query_as("SELECT * FROM positions WHERE id = ?")
-        .bind(&id)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|e| db_error("load position", e))?;
-
-    Ok(position)
+    Ok(inserted)
 }
 
 /// Settles a single position at expiry inside the caller's transaction.
@@ -635,24 +764,26 @@ pub(crate) async fn settle_position_in_tx(
         return Ok(None);
     }
 
-    let intrinsic = intrinsic_value(&position.option_type, position.strike, fixing);
-    let notional = intrinsic * position.contracts;
+    let intrinsic = intrinsic_value(&position.option_type, position.strike.to_f64(), fixing);
+    let notional = intrinsic * position.contracts.to_f64();
 
     // Long: the holder receives intrinsic value (premium was paid at open).
     // Short: the writer pays intrinsic value out of the locked collateral;
     // if collateral is short of the liability we settle what is available
     // and leave the account balance at zero rather than going negative.
+    let collateral = position.collateral.to_f64();
+    let entry_premium = position.entry_premium.to_f64();
     let (balance_delta, collateral_release) = if position.position_type == "long" {
-        (notional, position.collateral)
+        (notional, collateral)
     } else {
-        let liability = notional.min(position.collateral);
-        (-liability, position.collateral)
+        let liability = notional.min(collateral);
+        (-liability, collateral)
     };
 
     let realized_pnl = if position.position_type == "long" {
-        notional - position.open_premium * position.contracts
+        notional - entry_premium * position.contracts.to_f64()
     } else {
-        position.open_premium * position.contracts - notional
+        entry_premium * position.contracts.to_f64() - notional
     };
 
     sqlx::query(
@@ -716,7 +847,7 @@ pub(crate) async fn close_position_in_tx(
     let requirement = portfolio_requirement(&remaining);
 
     sqlx::query("UPDATE accounts SET collateral_locked = ? WHERE wallet_address = ?")
-        .bind(requirement.initial)
+        .bind(requirement.initial.to_f64())
         .bind(wallet_address)
         .execute(&mut **tx)
         .await

@@ -523,6 +523,3 @@ impl SponsorKeyPool {
         (address, sig.to_bytes().to_vec())
     }
 }
-
-    }
-}

@@ -114,10 +114,10 @@ pub async fn get_history(
     let filter_scope = format!("history:{}:closed,rolled", wallet_address);
 
     let cursor = match q.cursor.as_deref() {
-        Some(raw) => Some(Cursor::<HistoryCursorKey>::decode(
-            raw,
-            &state.cursor_secret,
+        Some(raw) => Some(Cursor::<String>::decode(
+            state.cursor_secret.as_bytes(),
             &filter_scope,
+            raw,
         )?),
         None => None,
     };
@@ -127,24 +127,29 @@ pub async fn get_history(
     let fetch_limit = limit + 1;
 
     let mut trades: Vec<Position> = match &cursor {
-        Some(c) => sqlx::query_as(
-            "SELECT * FROM positions
-                WHERE wallet_address = ? AND status IN ('closed', 'rolled')
-                  AND (? IS NULL OR epoch_id = ?)
-                  AND (closed_at < ? OR (closed_at = ? AND id < ?))
-             ORDER BY closed_at DESC, id DESC
-             LIMIT ?",
-        )
-        .bind(&wallet_address)
-        .bind(scope_epoch)
-        .bind(scope_epoch)
-        .bind(c.sort_key)
-        .bind(c.sort_key)
-        .bind(c.id)
-        .bind(fetch_limit)
-        .fetch_all(&state.db)
-        .await
-        .map_err(|e| db_error("load trade history", e))?,
+        Some(c) => {
+            let payload = c.payload();
+            let sort_key = payload.sort_key.clone();
+            let id = payload.id.to_string();
+            sqlx::query_as(
+                "SELECT * FROM positions
+                    WHERE wallet_address = ? AND status IN ('closed', 'rolled')
+                      AND (? IS NULL OR epoch_id = ?)
+                      AND (closed_at < ? OR (closed_at = ? AND id < ?))
+                 ORDER BY closed_at DESC, id DESC
+                 LIMIT ?",
+            )
+            .bind(&wallet_address)
+            .bind(scope_epoch)
+            .bind(scope_epoch)
+            .bind(&sort_key)
+            .bind(&sort_key)
+            .bind(&id)
+            .bind(fetch_limit)
+            .fetch_all(&state.db)
+            .await
+            .map_err(|e| db_error("load trade history", e))?
+        }
         None => {
             // Deprecated offset fallback for one release: only used when no
             // cursor is supplied and an explicit offset is requested.
@@ -173,17 +178,15 @@ pub async fn get_history(
     }
 
     let next_cursor = if has_more {
-        trades.last().map(|last| {
-            Cursor::new(
-                HistoryCursorKey {
-                    sort_key: last.closed_at,
-                    id: last.id,
-                },
-                &state.cursor_secret,
-                &filter_scope,
-            )
-            .encode()
-        })
+        let last = trades.last().unwrap();
+        let sort_key = last.closed_at.clone().unwrap_or_default();
+        let id = last.id.parse::<i64>().unwrap_or(0);
+        Some(Cursor::encode(
+            state.cursor_secret.as_bytes(),
+            &filter_scope,
+            sort_key,
+            id,
+        )?)
     } else {
         None
     };
@@ -216,6 +219,7 @@ pub async fn get_history(
     Ok(Json(HistoryResponse {
         trades,
         stats,
+        epoch: q.epoch.clone(),
         epoch_id: scope_epoch,
         has_more,
         next_cursor,
@@ -229,12 +233,6 @@ pub const EXPORT_SCHEMA_VERSION: &str = "1";
 const MAX_EXPORT_RANGE_SECS: i64 = 365 * 24 * 60 * 60;
 
 /// Sort key for the trade-history keyset cursor: `(closed_at, id)`.
-#[derive(Serialize, Deserialize)]
-struct HistoryCursorKey {
-    sort_key: String,
-    id: i64,
-}
-
 #[derive(Deserialize)]
 pub struct ExportQuery {
     pub format: Option<String>,
@@ -246,8 +244,8 @@ pub struct ExportQuery {
 #[derive(Serialize)]
 pub struct TaxLot {
     pub series: String,
-    pub open_trade_id: i64,
-    pub close_trade_id: i64,
+    pub open_trade_id: String,
+    pub close_trade_id: String,
     pub opened_at: String,
     pub closed_at: String,
     pub quantity: f64,
@@ -290,7 +288,7 @@ fn parse_utc_ts(s: &str) -> Result<i64, AppError> {
 fn fifo_match(trades: &[Position]) -> Vec<TaxLot> {
     use std::collections::HashMap;
     struct OpenLot {
-        trade_id: i64,
+        trade_id: String,
         opened_at: String,
         opened_ts: i64,
         qty: f64,
@@ -300,21 +298,21 @@ fn fifo_match(trades: &[Position]) -> Vec<TaxLot> {
     let mut out = Vec::new();
 
     for t in trades {
-        let series = t.symbol.clone();
-        let qty = t.quantity.abs();
-        let price = t.entry_price;
+        let series = t.underlying.clone();
+        let qty = t.contracts.to_f64().abs();
+        let price = t.entry_premium.to_f64();
         let ts = t
             .closed_at
             .as_deref()
             .and_then(|s| parse_utc_ts(s).ok())
             .unwrap_or(0);
-        let opened_at = t.opened_at.clone().unwrap_or_default();
+        let opened_at = t.opened_at.clone();
         let opened_ts = parse_utc_ts(&opened_at).unwrap_or(ts);
 
         match t.status.as_str() {
             "open" => {
                 lots.entry(series).or_default().push_back(OpenLot {
-                    trade_id: t.id,
+                    trade_id: t.id.clone(),
                     opened_at,
                     opened_ts,
                     qty,
@@ -332,8 +330,8 @@ fn fifo_match(trades: &[Position]) -> Vec<TaxLot> {
                     let holding_period_days = ((ts - front.opened_ts).max(0)) / 86_400;
                     out.push(TaxLot {
                         series: series.clone(),
-                        open_trade_id: front.trade_id,
-                        close_trade_id: t.id,
+                        open_trade_id: front.trade_id.clone(),
+                        close_trade_id: t.id.clone(),
                         opened_at: front.opened_at.clone(),
                         closed_at: t.closed_at.clone().unwrap_or_default(),
                         quantity: matched,
@@ -463,4 +461,4 @@ pub async fn export_history(
         .map_err(|e| AppError::Internal(format!("build export response: {e}")))?)
 }
 
-}
+

@@ -1,5 +1,5 @@
 use rust_decimal::prelude::*;
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, RoundingStrategy};
 use serde::Serialize;
 use sqlx::FromRow;
 use std::fmt;
@@ -92,7 +92,7 @@ impl Sub for Money {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MoneyError {
     NonFinite(f64),
     Overflow,
@@ -178,10 +178,10 @@ impl<'r> sqlx::Decode<'r, sqlx::Sqlite> for Money {
 impl<'q> sqlx::Encode<'q, sqlx::Sqlite> for Money {
     fn encode_by_ref(
         &self,
-        buf: &mut sqlx::sqlite::SqliteArgumentValue<'q>,
+        buf: &mut Vec<sqlx::sqlite::SqliteArgumentValue<'q>>,
     ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
         let scaled = self.to_scaled_i64()?;
-        <i64 as sqlx::Encode<sqlx::Sqlite>>::encode(scaled, buf)
+        <i64 as sqlx::Encode<sqlx::Sqlite>>::encode_by_ref(&scaled, buf)
     }
 }
 
@@ -201,10 +201,10 @@ impl<'r> sqlx::Decode<'r, sqlx::Sqlite> for Qty {
 impl<'q> sqlx::Encode<'q, sqlx::Sqlite> for Qty {
     fn encode_by_ref(
         &self,
-        buf: &mut sqlx::sqlite::SqliteArgumentValue<'q>,
+        buf: &mut Vec<sqlx::sqlite::SqliteArgumentValue<'q>>,
     ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
         let scaled = self.to_scaled_i64()?;
-        <i64 as sqlx::Encode<sqlx::Sqlite>>::encode(scaled, buf)
+        <i64 as sqlx::Encode<sqlx::Sqlite>>::encode_by_ref(&scaled, buf)
     }
 }
 

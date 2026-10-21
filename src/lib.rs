@@ -12,6 +12,11 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::request_id::{PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 
+pub mod admin;
+pub mod chain;
+pub mod expiry;
+pub mod margin;
+pub mod pagination;
 pub mod alerts;
 pub mod auth;
 pub mod collateral;
@@ -240,6 +245,7 @@ pub struct AppState {
     pub spot_prices: Arc<std::sync::Mutex<std::collections::HashMap<String, f64>>>,
     pub vol_surface: Arc<std::sync::Mutex<std::collections::HashMap<String, f64>>>,
     pub db: sqlx::SqlitePool,
+    pub cursor_secret: String,
     /// Broadcasts a JSON-encoded SpotResponse every time the price
     /// simulator nudges spot_prices, for the /api/v1/ws/spot handler to
     /// forward to connected clients. `send` errors (no receivers) are
@@ -268,6 +274,7 @@ impl AppState {
             spot_prices: Arc::new(std::sync::Mutex::new(prices)),
             vol_surface: Arc::new(std::sync::Mutex::new(vols)),
             db,
+            cursor_secret: std::env::var("CURSOR_SECRET").unwrap_or_else(|_| "zenith-cursor-secret".to_string()),
             spot_tx,
         }
     }
@@ -522,6 +529,13 @@ pub fn init_tracing() {
                 .unwrap_or_else(|_| "zenith_backend=info,tower_http=debug".into()),
         )
         .init();
+}
+
+pub fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Opens the database (from DATABASE_URL / .env, default sqlite://zenith.db)

@@ -70,10 +70,12 @@ fn leg_unrealized_pnl(state: &AppState, p: &Position) -> f64 {
     let Some(result) = current_bs_result(state, p) else {
         return 0.0;
     };
+    let contracts = p.contracts.to_f64();
+    let entry = p.entry_premium.to_f64();
     if p.position_type == "short" {
-        (p.entry_premium - result.premium) * p.contracts
+        (entry - result.premium) * contracts
     } else {
-        (result.premium - p.entry_premium) * p.contracts
+        (result.premium - entry) * contracts
     }
 }
 
@@ -94,7 +96,10 @@ pub struct StrategySummary {
 
 fn summarize(state: &AppState, strategy_id: String, legs: &[Position]) -> StrategySummary {
     let open_leg_count = legs.iter().filter(|p| p.status == "open").count();
-    let realized_pnl = legs.iter().filter_map(|p| p.realized_pnl).sum();
+    let realized_pnl = legs
+        .iter()
+        .filter_map(|p| p.realized_pnl.map(|m| m.to_f64()))
+        .sum();
     let unrealized_pnl = legs
         .iter()
         .filter(|p| p.status == "open")
@@ -249,7 +254,7 @@ pub async fn close_strategy(
 
     let mut closed = Vec::with_capacity(open_leg_ids.len());
     for id in &open_leg_ids {
-        closed.push(close_position_in_tx(&mut tx, &state, &wallet_address, id).await?);
+        closed.push(close_position_in_tx(&mut tx, &wallet_address, id).await?);
     }
 
     tx.commit()

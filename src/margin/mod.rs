@@ -19,11 +19,15 @@
 
 use std::collections::HashMap;
 
+use axum::http::StatusCode;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::FromPrimitive;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
-use crate::error::Error;
+use crate::error::AppError;
+
+pub type Error = AppError;
 
 /// A single leg of a position, as seen by the margin engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -286,10 +290,13 @@ impl MarginEngine {
     pub fn check_post_trade(&self, legs: &[MarginLeg], equity: Decimal) -> Result<(), Error> {
         let requirement = self.requirement(legs)?;
         if requirement.initial > equity {
-            return Err(Error::MarginExceeded {
-                required: requirement.initial,
-                equity,
-            });
+            return Err(AppError::new(
+                StatusCode::PAYMENT_REQUIRED,
+                format!(
+                    "margin requirement {} exceeds equity {}",
+                    requirement.initial, equity
+                ),
+            ));
         }
         Ok(())
     }
