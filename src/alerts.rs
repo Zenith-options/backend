@@ -7,19 +7,17 @@ use crate::auth::AuthUser;
 use crate::error::{db_error, AppError, AppJson};
 use crate::models::Alert;
 use crate::outbox::{self, AlertTriggeredPayload, DomainEvent, EVENT_VERSION};
+use crate::watchlist::CHAIN_EVENT_TYPES;
 use crate::AppState;
 
 pub async fn get_alerts(
     State(state): State<AppState>,
     AuthUser(wallet_address): AuthUser,
 ) -> Result<Json<Vec<Alert>>, AppError> {
-    // `id!` overrides the TEXT-PK nullable quirk; `triggered: bool` overrides
-    // the INTEGER column to decode as the model's bool.
-    let alerts: Vec<Alert> = sqlx::query_as!(
-        Alert,
-        "SELECT id AS \"id!\", wallet_address, underlying, condition, target_price, triggered AS \"triggered: bool\", created_at, triggered_at FROM alerts WHERE wallet_address = ? ORDER BY created_at DESC",
-        &wallet_address
+    let alerts: Vec<Alert> = sqlx::query_as(
+        "SELECT * FROM alerts WHERE wallet_address = ? ORDER BY created_at DESC",
     )
+    .bind(&wallet_address)
     .fetch_all(&state.db)
     .await
     .map_err(|e| db_error("load alerts", e))?;
@@ -76,11 +74,8 @@ pub async fn create_alert(
     .await
     .map_err(|e| db_error("create alert", e))?;
 
-    let alert: Alert = sqlx::query_as!(
-        Alert,
-        "SELECT id AS \"id!\", wallet_address, underlying, condition, target_price, triggered AS \"triggered: bool\", created_at, triggered_at FROM alerts WHERE id = ?",
-        &id
-    )
+    let alert: Alert = sqlx::query_as("SELECT * FROM alerts WHERE id = ?")
+    .bind(&id)
     .fetch_one(&state.db)
     .await
     .map_err(|e| db_error("load the alert just created", e))?;
@@ -93,7 +88,9 @@ pub async fn delete_alert(
     AuthUser(wallet_address): AuthUser,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    let result = sqlx::query!("DELETE FROM alerts WHERE id = ? AND wallet_address = ?", &id, &wallet_address)
+    let result = sqlx::query("DELETE FROM alerts WHERE id = ? AND wallet_address = ?")
+        .bind(&id)
+        .bind(&wallet_address)
         .execute(&state.db)
         .await
         .map_err(|e| db_error("delete alert", e))?;
@@ -106,6 +103,53 @@ pub async fn delete_alert(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Dispatch a typed chain event to wallets that opted into that event for the
+/// affected underlying. `event_id` must be stable across indexer retries.
+pub async fn dispatch_chain_event(
+    state: &AppState,
+    underlying: &str,
+    event_type: &str,
+    event_id: &str,
+    payload: serde_json::Value,
+) -> Result<usize, AppError> {
+    if !CHAIN_EVENT_TYPES.contains(&event_type) {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "unsupported chain event type",
+        ));
+    }
+
+    let wallets: Vec<(String,)> = sqlx::query_as(
+        "SELECT DISTINCT wallet_address
+         FROM watchlist_event_subscriptions
+         WHERE underlying = ? AND event_type = ?
+         ORDER BY wallet_address",
+    )
+    .bind(underlying)
+    .bind(event_type)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| db_error("load chain event subscribers", e))?;
+
+    let payload = serde_json::json!({
+        "chain_event_id": event_id,
+        "underlying": underlying,
+        "details": payload,
+    });
+    let mut queued = 0;
+    for (wallet,) in wallets {
+        queued += crate::delivery::emit_event_with_key(
+            state,
+            &wallet,
+            event_type,
+            payload.clone(),
+            Some(event_id),
+        )
+        .await?;
+    }
+    Ok(queued)
 }
 
 /// Checks every untriggered alert against the current spot price for its

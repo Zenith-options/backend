@@ -25,19 +25,29 @@ use crate::{
     AppState,
 };
 
-const EVENT_TYPES: [&str; 4] = [
+const EVENT_TYPES: [&str; 9] = [
     "alert_triggered",
     "position_settled",
     "position_liquidated",
     "order_filled",
+    "settlement_completed",
+    "margin_call_threshold",
+    "liquidation_warning",
+    "delivery_status",
+    "vault_share_price_move",
 ];
-const NOTIFICATION_EVENT_TYPES: [&str; 6] = [
+const NOTIFICATION_EVENT_TYPES: [&str; 11] = [
     "alert_triggered",
     "position_settled",
     "position_liquidated",
     "order_filled",
     "margin_call",
     "liquidation",
+    "settlement_completed",
+    "margin_call_threshold",
+    "liquidation_warning",
+    "delivery_status",
+    "vault_share_price_move",
 ];
 const MAX_PAYLOAD_BYTES: usize = 32 * 1024;
 const MAX_EVENT_PAYLOAD_BYTES: usize = 30 * 1024;
@@ -659,6 +669,19 @@ pub async fn emit_event(
     event_type: &str,
     payload: serde_json::Value,
 ) -> Result<usize, AppError> {
+    emit_event_with_key(state, wallet_address, event_type, payload, None).await
+}
+
+/// Persist and enqueue a wallet event once per `(wallet, type, event_key)`.
+/// Chain event producers should pass a stable ledger event id as the key so
+/// replaying an indexed ledger cannot enqueue duplicate notifications.
+pub async fn emit_event_with_key(
+    state: &AppState,
+    wallet_address: &str,
+    event_type: &str,
+    payload: serde_json::Value,
+    event_key: Option<&str>,
+) -> Result<usize, AppError> {
     if !NOTIFICATION_EVENT_TYPES.contains(&event_type) {
         return Err(AppError::new(
             StatusCode::BAD_REQUEST,
@@ -704,17 +727,24 @@ pub async fn emit_event(
         return Ok(0);
     }
 
-    let event_id = uuid::Uuid::new_v4().to_string();
-    sqlx::query(
-        "INSERT INTO delivery_events (id, wallet_address, event_type, payload) VALUES (?, ?, ?, ?)",
+    let event_id = sqlx::query_scalar::<_, String>(
+        "INSERT INTO delivery_events
+            (id, wallet_address, event_type, payload, event_key)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT DO NOTHING
+         RETURNING id",
     )
-    .bind(&event_id)
+    .bind(uuid::Uuid::new_v4().to_string())
     .bind(wallet_address)
     .bind(event_type)
     .bind(String::from_utf8(body).expect("serialized JSON is valid UTF-8"))
-    .execute(&state.db)
+    .bind(event_key)
+    .fetch_optional(&state.db)
     .await
     .map_err(|e| db_error("store delivery event", e))?;
+    let Some(event_id) = event_id else {
+        return Ok(0);
+    };
 
     let mut count = 0;
     for endpoint_id in matching_webhooks {
