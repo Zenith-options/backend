@@ -1,4 +1,5 @@
 pub mod lease;
+pub mod bounty;
 pub mod settlement;
 pub mod tasks;
 pub mod ttl;

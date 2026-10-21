@@ -18,6 +18,7 @@ pub mod collateral;
 pub mod db;
 pub mod error;
 pub mod history;
+pub mod keeper;
 pub mod math_fixed;
 pub mod models;
 pub mod payoff;
@@ -658,6 +659,7 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/portfolio/greeks",
             get(positions::get_portfolio_greeks),
         )
+        .route("/api/v1/keeper/bounties", get(keeper::bounty::accounting))
         .layer(PropagateRequestIdLayer::new(request_id_header()))
         .layer(TraceLayer::new_for_http())
         .layer(SetRequestIdLayer::new(
