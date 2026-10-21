@@ -16,6 +16,7 @@ pub mod alerts;
 pub mod auth;
 pub mod collateral;
 pub mod db;
+pub mod dr;
 pub mod error;
 pub mod history;
 pub mod math_fixed;

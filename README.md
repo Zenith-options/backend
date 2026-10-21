@@ -75,6 +75,13 @@ integer-scaled prototypes in `math_fixed.rs` — see `docs/verification.md`
 for the property list, the `cargo kani` command, and the documented `f64`
 gap. `.github/workflows/kani.yml` runs it on every PR and nightly.
 
+Backups are two independent layers: Litestream streams the SQLite WAL to
+object storage continuously, and `scripts/backup.sh` takes checksummed
+snapshots to a separate bucket. `scripts/restore.sh` restores from either
+and validates the result. `docs/runbooks/disaster-recovery.md` lists every
+piece of durable state (including indexer cursors and on-chain sequence
+numbers) and the recovery procedure for each failure scenario.
+
 
 ## Endpoints
 

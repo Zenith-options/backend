@@ -1,7 +1,9 @@
 # Restore runbook
 
 How to restore the Zenith database from the Litestream replica, and how to
-verify the restore is good.
+verify the restore is good. For the full disaster-recovery picture — the
+inventory of durable state, snapshot backups, indexer catch-up and sequence
+number recovery — see [`disaster-recovery.md`](disaster-recovery.md).
 
 ## Backup architecture
 

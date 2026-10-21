@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 #
-# Point-in-time restore of the Zenith database from a Litestream replica,
-# followed by validation. See docs/runbooks/restore.md for the full
-# runbook.
+# Restore the Zenith database, followed by validation. Two sources:
+#
+#   * a Litestream replica (point-in-time), or
+#   * a snapshot written by scripts/backup.sh (when the replica is lost).
+#
+# See docs/runbooks/restore.md and docs/runbooks/disaster-recovery.md.
 #
 # Usage:
-#   scripts/restore.sh <target-timestamp> [output-path]
+#   scripts/restore.sh <target-timestamp | snapshot.db.gz> [output-path]
 #
 #   <target-timestamp>  RFC 3339 timestamp to restore to, e.g.
 #                       2026-09-28T12:34:56Z (or "now" for the latest)
+#   <snapshot.db.gz>    path to a backup.sh snapshot; its sibling
+#                       .manifest.json must exist and its sha256 must match
 #   [output-path]       where to write the restored database
 #                       (default: /tmp/zenith-restore.db)
 #
@@ -22,11 +27,16 @@
 
 set -euo pipefail
 
-TIMESTAMP="${1:?usage: restore.sh <target-timestamp> [output-path]}"
+TIMESTAMP="${1:?usage: restore.sh <target-timestamp | snapshot.db.gz> [output-path]}"
 OUT="${2:-/tmp/zenith-restore.db}"
 CONFIG="${LITESTREAM_CONFIG:-deploy/litestream.yml}"
 
-if [ ! -f "$CONFIG" ]; then
+SNAPSHOT=""
+case "$TIMESTAMP" in
+  *.db.gz) SNAPSHOT="$TIMESTAMP" ;;
+esac
+
+if [ -z "$SNAPSHOT" ] && [ ! -f "$CONFIG" ]; then
   echo "ERROR: litestream config not found at $CONFIG" >&2
   exit 1
 fi
@@ -34,8 +44,28 @@ fi
 START_NS=$(date +%s%N)
 
 # ── 1. Restore ──────────────────────────────────────────────────────────────
-# Prefer the litestream binary; fall back to the official container.
-if command -v litestream >/dev/null 2>&1; then
+if [ -n "$SNAPSHOT" ]; then
+  # Snapshot restore: refuse a file whose checksum doesn't match the
+  # manifest written next to it at backup time.
+  MANIFEST="${SNAPSHOT%.db.gz}.manifest.json"
+  if [ ! -f "$SNAPSHOT" ] || [ ! -f "$MANIFEST" ]; then
+    echo "ERROR: snapshot $SNAPSHOT or manifest $MANIFEST not found" >&2
+    exit 1
+  fi
+  EXPECTED_SUM="$(sqlite3 :memory: "SELECT json_extract(readfile('$MANIFEST'), '\$.sha256');")"
+  if command -v sha256sum >/dev/null 2>&1; then
+    ACTUAL_SUM="$(sha256sum "$SNAPSHOT" | cut -d' ' -f1)"
+  else
+    ACTUAL_SUM="$(shasum -a 256 "$SNAPSHOT" | cut -d' ' -f1)"
+  fi
+  if [ "$EXPECTED_SUM" != "$ACTUAL_SUM" ]; then
+    echo "FAIL: snapshot sha256 $ACTUAL_SUM != manifest $EXPECTED_SUM" >&2
+    exit 1
+  fi
+  echo "ok: snapshot checksum matches manifest"
+  gunzip -c "$SNAPSHOT" > "$OUT"
+elif command -v litestream >/dev/null 2>&1; then
+  # Prefer the litestream binary; fall back to the official container.
   litestream restore -config "$CONFIG" -timestamp "$TIMESTAMP" -o "$OUT"
 else
   docker run --rm \
@@ -73,6 +103,9 @@ echo "ok: integrity_check"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXPECTED="$(ls "$REPO_ROOT"/migrations/*.sql 2>/dev/null \
   | sed 's/.*\///;s/_.*//' | sort -n | tail -1)"
+# Strip leading zeros ("0011" -> 11) so the comparison is numeric, matching
+# how sqlx records the version.
+EXPECTED="$((10#$EXPECTED))"
 LATEST="$(sqlite3 "$OUT" "SELECT MAX(version) FROM _sqlx_migrations;")"
 FAILED="$(sqlite3 "$OUT" "SELECT COUNT(*) FROM _sqlx_migrations WHERE success = 0;")"
 if [ "$FAILED" != "0" ]; then
@@ -80,8 +113,14 @@ if [ "$FAILED" != "0" ]; then
   exit 1
 fi
 if [ "$LATEST" != "$EXPECTED" ]; then
-  echo "FAIL: restored migration version $LATEST != expected $EXPECTED" >&2
-  exit 1
+  if [ -n "$SNAPSHOT" ] && [ "$LATEST" -lt "$EXPECTED" ] 2>/dev/null; then
+    # An older snapshot legitimately predates newer migrations; the backend
+    # applies them on startup. Only a *newer* schema than the code is fatal.
+    echo "warn: snapshot is at migration $LATEST, code expects $EXPECTED (will migrate on startup)"
+  else
+    echo "FAIL: restored migration version $LATEST != expected $EXPECTED" >&2
+    exit 1
+  fi
 fi
 echo "ok: migration version $LATEST"
 
@@ -113,6 +152,27 @@ if [ -n "$VIOLATIONS" ]; then
   exit 1
 fi
 echo "ok: ledger reconciliation invariant"
+
+# ── 5. Indexer state (informational) ────────────────────────────────────────
+# The restored cursors sit at the backup point; the indexer must backfill
+# from there to the chain tip before settlement outcomes are trusted again.
+# This step reports what the restore brought back. The full gap/backfill
+# plan is computed by dr::plan_indexer_recovery (see the DR runbook).
+has_table() {
+  [ "$(sqlite3 "$OUT" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='$1';")" = "1" ]
+}
+if has_table indexer_cursors; then
+  echo "indexer cursors (resume from ledger + 1):"
+  sqlite3 -separator ' ' "$OUT" "SELECT '  ' || stream, ledger FROM indexer_cursors ORDER BY stream;"
+else
+  echo "info: no indexer_cursors table; indexer will start from its configured genesis"
+fi
+if has_table indexer_gap_alerts; then
+  OPEN_GAPS="$(sqlite3 "$OUT" "SELECT COUNT(*) FROM indexer_gap_alerts WHERE resolved_at IS NULL;")"
+  if [ "$OPEN_GAPS" != "0" ]; then
+    echo "warn: $OPEN_GAPS unresolved indexer gap(s) in the restored database; backfill before go-live"
+  fi
+fi
 
 # ── RTO ─────────────────────────────────────────────────────────────────────
 END_NS=$(date +%s%N)
