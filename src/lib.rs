@@ -13,6 +13,7 @@ use tower_http::request_id::{PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 
 pub mod alerts;
+pub mod api_version;
 pub mod auth;
 pub mod collateral;
 pub mod db;
@@ -637,6 +638,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/chain", get(get_chain))
         .route("/api/v1/expiries/:underlying", get(get_expiry_calendar))
         .route("/api/v1/stats", get(get_protocol_stats))
+        .route("/api/v2/spot", get(api_version::get_spot_v2))
+        .route("/api/versions/usage", get(api_version::usage))
         .merge(auth_rate_limited_routes())
         .merge(mutation_rate_limited_routes())
         .route("/api/v1/auth/me", get(auth::get_me))
@@ -672,6 +675,9 @@ pub fn build_router(state: AppState) -> Router {
             get(settlement_reports::statement),
         )
         .layer(PropagateRequestIdLayer::new(request_id_header()))
+        .layer(axum::middleware::from_fn(
+            api_version::negotiate_version,
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(SetRequestIdLayer::new(
             request_id_header(),
