@@ -21,6 +21,7 @@ pub mod history;
 pub mod math_fixed;
 pub mod models;
 pub mod payoff;
+pub mod settlement_policy;
 pub mod positions;
 pub mod prices;
 pub mod rate_limit_key;

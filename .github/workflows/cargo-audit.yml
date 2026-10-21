@@ -27,7 +27,7 @@ jobs:
           cat cargo-audit.json >> "$GITHUB_STEP_SUMMARY"
           exit "$result"
       - name: File or update security issue
-        if: steps.audit.outcome == 'failure'
+        if: steps.audit.outputs.exit_code == '1'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
@@ -61,3 +61,8 @@ jobs:
                 owner, repo, title, body
               });
             }
+      - name: Fail on audit tooling errors
+        if: steps.audit.outputs.exit_code != '0' && steps.audit.outputs.exit_code != '1'
+        run: |
+          echo "cargo audit could not inspect the dependency tree (exit ${{ steps.audit.outputs.exit_code }})." >&2
+          exit 1
