@@ -75,6 +75,11 @@ integer-scaled prototypes in `math_fixed.rs` — see `docs/verification.md`
 for the property list, the `cargo kani` command, and the documented `f64`
 gap. `.github/workflows/kani.yml` runs it on every PR and nightly.
 
+The Soroban option contract source is in `contracts/options`. It escrows an
+explicitly configured SEP-41 token, mints seven-decimal option balances,
+accepts admin-authorized expiry fixings, and pays capped intrinsic value.
+See `contracts/options/README.md` for collateral semantics and build commands.
+
 
 ## Endpoints
 
@@ -129,14 +134,25 @@ requiring a session — see `mutation_rate_limited_routes()` in `lib.rs`.
 | `GET /api/v1/account` | Balance + locked collateral |
 | `GET /api/v1/positions` | List positions (`?status=`, `?strategy_id=`, `?limit=`, `?offset=`) |
 | `POST /api/v1/positions/open` | Price and open one position |
+| `POST /api/v1/positions/:id/exercise` | Exercise a long position quantity (up to 7 decimals) against its persisted expiry fixing; include a stable `request_id` for retry safety |
 | `POST /api/v1/positions/:id/close` | Settle an open position at current spot/vol |
 | `POST /api/v1/positions/:id/roll` | Close + reopen at a new strike/expiry, atomically |
 | `GET /api/v1/history` | Closed/rolled positions + win/loss/pnl stats (`?limit=`, `?offset=` — stats always cover the full history, not just the returned page) |
 | `GET /api/v1/portfolio/greeks` | Aggregate Greeks across all open positions, repriced live |
+| `POST /api/v1/risk/stress` | Stress-test the authenticated portfolio and pooled paper book under named, per-underlying correlated spot/volatility shocks; returns projected margin shortfalls |
 | `POST /api/v1/strategies/execute` | Open 2+ legs atomically under one shared `strategy_id` |
 | `GET /api/v1/strategies` | List multi-leg strategies with aggregate realized/unrealized P&L |
 | `GET /api/v1/strategies/:id` | One strategy's legs + aggregate P&L |
 | `POST /api/v1/strategies/:id/close` | Close every currently-open leg of a strategy atomically |
+
+### Operator health **operator bearer token**
+
+`GET /admin/settlement` renders the current settlement queue, stuck chain
+transactions, account margin breaches, vault reserve coverage, and keeper
+liveness. Set `ZENITH_OPERATOR_TOKEN` and send
+`Authorization: Bearer <token>`. On-chain coverage is used when a
+`vault_reserve_snapshots` observation exists; otherwise the page shows a
+clearly labelled paper-ledger estimate when account collateral exists.
 
 ### Watchlist & alerts **auth**
 
