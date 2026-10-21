@@ -33,6 +33,7 @@ pub mod strategies;
 pub mod strategy_execution;
 pub mod strkey;
 pub mod watchlist;
+pub mod vault_controls;
 
 // Kani proof harnesses for the fixed-point arithmetic in `math_fixed`
 // (issue #119). Only compiled under `cargo kani`, so normal builds and
