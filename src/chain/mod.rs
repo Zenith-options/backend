@@ -1,6 +1,9 @@
 pub mod bindings;
+pub mod dex;
 pub mod handlers;
 pub mod horizon;
+pub mod liquidation_router;
+pub mod oracle;
 pub mod prepared_tx;
 pub mod projections;
 pub mod readiness;

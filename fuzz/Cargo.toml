@@ -82,3 +82,9 @@ name = "cursor_query"
 path = "fuzz_targets/cursor_query.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "min_received"
+path = "fuzz_targets/min_received.rs"
+test = false
+doc = false

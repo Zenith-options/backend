@@ -152,3 +152,91 @@ mod tests {
         assert_eq!(fee_fixed(0, 10_000), 0);
     }
 }
+
+// ── Slippage arithmetic (integer-scaled, for Kani/fuzz) ──────────────────────
+
+/// Scale factor for slippage computations: 6 decimal places.
+pub const SLIPPAGE_SCALE: i64 = 1_000_000;
+
+/// Compute the minimum acceptable received amount given `expected` units and
+/// `max_slippage_bps` (basis points, 1 bp = 0.01%).
+///
+/// Rounds **down** (conservative for the protocol: less is accepted rather
+/// than more, so the guard is never bypassed by rounding).
+///
+/// # Domain
+/// - `expected >= 0`
+/// - `0 <= max_slippage_bps <= 10_000`
+pub fn min_received_fixed(expected: i64, max_slippage_bps: i64) -> i64 {
+    debug_assert!(max_slippage_bps >= 0 && max_slippage_bps <= 10_000);
+    expected.saturating_mul(10_000 - max_slippage_bps) / 10_000
+}
+
+/// Realized slippage in basis points given `expected` and `received`.
+/// Returns `None` if `expected` is zero to avoid division by zero.
+pub fn realized_slippage_bps(expected: i64, received: i64) -> Option<i64> {
+    if expected == 0 { return None; }
+    Some((expected - received).saturating_mul(10_000) / expected)
+}
+
+/// Shortfall: how many units of `asset_in` went unconverted.
+/// Saturates at zero (never negative).
+pub fn conversion_shortfall(amount_in: i64, filled: i64) -> i64 {
+    (amount_in - filled).max(0)
+}
+
+#[cfg(test)]
+mod slippage_tests {
+    use super::*;
+
+    #[test]
+    fn min_received_zero_slippage_is_identity() {
+        assert_eq!(min_received_fixed(1_000_000, 0), 1_000_000);
+    }
+
+    #[test]
+    fn min_received_100_bps_is_99_pct() {
+        assert_eq!(min_received_fixed(1_000_000, 100), 990_000);
+    }
+
+    #[test]
+    fn min_received_full_slippage_is_zero() {
+        assert_eq!(min_received_fixed(1_000_000, 10_000), 0);
+    }
+
+    #[test]
+    fn min_received_rounds_down() {
+        // 7 * (10_000 - 1) / 10_000 = 69_993 / 10_000 = 6.9993 → floors to 6
+        assert_eq!(min_received_fixed(7, 1), 6);
+    }
+
+    #[test]
+    fn realized_slippage_no_slippage() {
+        assert_eq!(realized_slippage_bps(1_000, 1_000), Some(0));
+    }
+
+    #[test]
+    fn realized_slippage_one_percent() {
+        assert_eq!(realized_slippage_bps(10_000, 9_900), Some(100));
+    }
+
+    #[test]
+    fn realized_slippage_zero_expected() {
+        assert_eq!(realized_slippage_bps(0, 0), None);
+    }
+
+    #[test]
+    fn shortfall_full_fill_is_zero() {
+        assert_eq!(conversion_shortfall(100, 100), 0);
+    }
+
+    #[test]
+    fn shortfall_partial_fill() {
+        assert_eq!(conversion_shortfall(100, 60), 40);
+    }
+
+    #[test]
+    fn shortfall_never_negative() {
+        assert_eq!(conversion_shortfall(50, 100), 0);
+    }
+}
