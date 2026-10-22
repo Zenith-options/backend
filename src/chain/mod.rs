@@ -2,6 +2,7 @@ pub mod bindings;
 pub mod handlers;
 pub mod horizon;
 pub mod prepared_tx;
+pub mod projections;
 pub mod readiness;
 pub mod relayer;
 pub mod rpc;
