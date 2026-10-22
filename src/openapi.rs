@@ -109,6 +109,7 @@ impl Modify for SecurityAddon {
         crate::chain::prepared_tx::PrepareResponse,
         crate::chain::prepared_tx::SubmitRequest,
         crate::chain::prepared_tx::SubmitResponse,
+        crate::chain::assets::AssetDefinition,
     )),
     modifiers(&SecurityAddon)
 )]

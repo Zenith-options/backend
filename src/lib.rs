@@ -241,6 +241,7 @@ pub struct AppState {
     pub spot_prices: Arc<std::sync::Mutex<std::collections::HashMap<String, f64>>>,
     pub vol_surface: Arc<std::sync::Mutex<std::collections::HashMap<String, f64>>>,
     pub db: sqlx::SqlitePool,
+    pub assets: crate::chain::assets::AssetRegistry,
     /// Broadcasts a JSON-encoded SpotResponse every time the price
     /// simulator nudges spot_prices, for the /api/v1/ws/spot handler to
     /// forward to connected clients. `send` errors (no receivers) are
@@ -268,7 +269,8 @@ impl AppState {
         Self {
             spot_prices: Arc::new(std::sync::Mutex::new(prices)),
             vol_surface: Arc::new(std::sync::Mutex::new(vols)),
-            db,
+            db: db.clone(),
+            assets: crate::chain::assets::AssetRegistry::new(db),
             spot_tx,
         }
     }
@@ -662,6 +664,8 @@ pub fn build_router(state: AppState) -> Router {
             get(positions::get_portfolio_greeks),
         )
         .route("/api/v1/tx/:handle", get(chain::handlers::get_preparation))
+        .route("/api/v1/assets", get(chain::assets::list_assets))
+        .route("/api/v1/assets/all", get(chain::assets::list_all_assets))
         .layer(PropagateRequestIdLayer::new(request_id_header()))
         .layer(TraceLayer::new_for_http())
         .layer(SetRequestIdLayer::new(

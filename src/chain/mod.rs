@@ -1,3 +1,4 @@
+pub mod assets;
 pub mod bindings;
 pub mod dex;
 pub mod handlers;
