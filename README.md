@@ -108,7 +108,21 @@ All `/api/v1/*` endpoints marked **auth** require an
 | `GET /api/v1/expiries/:underlying` | Available expiries for an underlying |
 | `GET /api/v1/stats` | Protocol-wide stats (mocked, not derived from real trades) |
 | `GET /api/v1/ws/spot` | WebSocket: snapshot on connect, then a live tick every ~2s |
+| `GET /api/v1/market-maker/stream` **auth** | Authenticated, sequenced WebSocket for maker quotes, shared events, and idempotent order handoff |
 | `POST /api/v1/portfolio/payoff` | Combined P&L curve for a set of caller-supplied legs (no auth — legs carry their own premium) |
+
+Market-maker sessions use the existing bearer session token and require an
+enabled wallet entry in `market_maker_accounts` (provisioned by an operator;
+there is no public enrollment endpoint). Quotes are stored per maker and are
+not broadcast to competing makers. Clients reconnect with
+`?after=<sequence>`; `resync_required` means replay exceeded the bounded
+buffer or the connection fell behind. Series/oracle/margin publishers can
+persist and fan out updates through `market_maker::publish_event`; private
+margin events must include their wallet audience. Order entry remains
+fail-closed until an on-chain `SettlementHandoff` adapter and a positive
+per-order notional limit are configured through
+`build_router_with_market_maker`. The default router does not submit trades
+to the simulated chain client.
 
 ### Auth (public, rate-limited)
 

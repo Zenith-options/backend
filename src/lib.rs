@@ -18,6 +18,7 @@ pub mod collateral;
 pub mod db;
 pub mod error;
 pub mod history;
+pub mod market_maker;
 pub mod math_fixed;
 pub mod models;
 pub mod payoff;
@@ -621,6 +622,16 @@ fn request_id_header() -> axum::http::HeaderName {
 }
 
 pub fn build_router(state: AppState) -> Router {
+    let market_maker_state = market_maker::GatewayState::new(state.db.clone());
+    build_router_with_market_maker(state, market_maker_state)
+}
+
+/// Builds the public API with an explicitly configured market-maker settlement
+/// adapter. `build_router` keeps order entry disabled unless this is supplied.
+pub fn build_router_with_market_maker(
+    state: AppState,
+    market_maker_state: market_maker::GatewayState,
+) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
@@ -658,6 +669,8 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/portfolio/greeks",
             get(positions::get_portfolio_greeks),
         )
+        .with_state(state.clone())
+        .merge(market_maker::routes(market_maker_state))
         .layer(PropagateRequestIdLayer::new(request_id_header()))
         .layer(TraceLayer::new_for_http())
         .layer(SetRequestIdLayer::new(
@@ -665,7 +678,6 @@ pub fn build_router(state: AppState) -> Router {
             request_id::MakeRequestUuid,
         ))
         .layer(cors)
-        .with_state(state)
 }
 
 /// Waits for Ctrl+C or SIGTERM so axum stops accepting new connections
