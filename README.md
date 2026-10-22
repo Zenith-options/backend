@@ -8,11 +8,13 @@ a live spot-price WebSocket feed.
 ## Status
 
 Market data (spot prices, vol surface) is in-memory and nudged by a
-background simulator — there's no real price feed or on-chain
-integration yet. Everything else (accounts, positions, watchlist,
-alerts) persists to a SQLite file via sqlx. This is a paper-trading
-backend for the frontend to build against, not a production trading
-system.
+background simulator — the backend has no production price-source or
+on-chain publishing integration yet. The repository includes an
+experimental Soroban settlement-oracle contract in `contracts/oracle`,
+but it is not connected to the backend, deployed, or ready for real funds.
+Everything else (accounts, positions, watchlist, alerts) persists to a
+SQLite file via sqlx. This is a paper-trading backend for the frontend to
+build against, not a production trading system.
 
 ## Getting started
 
@@ -57,7 +59,9 @@ default; SOPS files and HashiCorp Vault are also supported) and cached in a
 `SecretStore` that fails fast at startup and fails soft on refresh. HMAC keys
 rotate through a sign-with-current / verify-with-current-or-previous ring, and
 Stellar signing can be delegated to Vault Transit or AWS KMS so the private
-key never enters process memory. See `docs/secrets-rotation.md`.
+key never enters process memory. See `docs/secrets-rotation.md` and
+`docs/threat-model.md` for the system security assumptions and production
+readiness gaps.
 
 `tests/invariants_test.rs` is a property-based state-machine harness: it
 generates random sequences of ledger operations, steps a pure in-memory
