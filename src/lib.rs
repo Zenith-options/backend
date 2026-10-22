@@ -21,6 +21,8 @@ pub mod history;
 pub mod math_fixed;
 pub mod models;
 pub mod payoff;
+pub mod preview;
+pub mod series_lifecycle;
 pub mod positions;
 pub mod prices;
 pub mod rate_limit_key;
@@ -398,18 +400,60 @@ async fn get_chain(
 
     let spot = *prices.get(&q.underlying).ok_or(StatusCode::NOT_FOUND)?;
     let base_vol = *vols.get(&q.underlying).ok_or(StatusCode::NOT_FOUND)?;
+    drop(vols);
+    drop(prices);
     let t = q.expiry_days / 365.0;
     let r = 0.05_f64;
 
-    // Generate strikes: ±30% from spot in 5% increments
-    let step_count = 7;
-    let step_pct = 0.05_f64;
+    let matching_series: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM option_series
+         WHERE UPPER(underlying) = UPPER(?1)
+           AND ABS(julianday(expiry) - julianday('now') - ?2) <= 2",
+    )
+    .bind(&q.underlying)
+    .bind(q.expiry_days)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, underlying = %q.underlying, "failed to filter chain by series lifecycle");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let strikes = if matching_series > 0 {
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT strike_scaled, strike_scale FROM option_series
+             WHERE UPPER(underlying) = UPPER(?1)
+               AND ABS(julianday(expiry) - julianday('now') - ?2) <= 2
+             GROUP BY strike_scaled, strike_scale
+             HAVING SUM(CASE WHEN status = 'active' AND trading_halted = 0
+                                  AND option_type = 'call' THEN 1 ELSE 0 END) > 0
+                AND SUM(CASE WHEN status = 'active' AND trading_halted = 0
+                                  AND option_type = 'put' THEN 1 ELSE 0 END) > 0
+             ORDER BY strike_scaled",
+        )
+        .bind(&q.underlying)
+        .bind(q.expiry_days)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, underlying = %q.underlying, "failed to load active option series");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .into_iter()
+        .map(|(scaled, scale)| scaled as f64 / 10_f64.powi(scale.clamp(0, 12) as i32))
+        .collect::<Vec<_>>()
+    } else {
+        // Legacy simulated chains remain available until a series registry
+        // exists for the requested underlying and expiry.
+        (-7..=7)
+            .map(|i| {
+                (spot * (1.0 + i as f64 * 0.05) * 10000.0).round() / 10000.0
+            })
+            .filter(|strike| *strike > 0.0)
+            .collect()
+    };
     let mut chain = Vec::new();
 
-    for i in -step_count..=step_count {
-        // Round to 4dp, not 2 — 2dp collapses several adjacent strikes to
-        // the same value for a sub-$1 asset like XLM (spot ~0.118).
-        let strike = (spot * (1.0 + i as f64 * step_pct) * 10000.0).round() / 10000.0;
+    for strike in strikes {
         if strike <= 0.0 {
             continue;
         }
@@ -632,6 +676,35 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/price", get(price_option))
         .route("/api/v1/iv", get(get_implied_vol))
         .route("/api/v1/chain", get(get_chain))
+        .route(
+            "/api/v1/settlement/preview",
+            post(preview::preview_settlement),
+        )
+        .route("/api/v1/series", get(series_lifecycle::list_active_series))
+        .route(
+            "/api/v1/series/:id/halt",
+            post(series_lifecycle::halt_series),
+        )
+        .route(
+            "/api/v1/series/:id/resume",
+            post(series_lifecycle::resume_series),
+        )
+        .route(
+            "/api/v1/series/:id/delist",
+            post(series_lifecycle::delist_series),
+        )
+        .route(
+            "/api/v1/series/:id/settle",
+            post(series_lifecycle::settle_series_early),
+        )
+        .route(
+            "/api/v1/series/:id/payoff",
+            post(payoff::set_series_payoff),
+        )
+        .route(
+            "/api/v1/payoff/registry/:kind",
+            post(payoff::configure_payoff),
+        )
         .route("/api/v1/expiries/:underlying", get(get_expiry_calendar))
         .route("/api/v1/stats", get(get_protocol_stats))
         .merge(auth_rate_limited_routes())
@@ -654,6 +727,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/strategies/:id", get(strategies::get_strategy))
         .route("/api/v1/ws/spot", get(prices::ws_spot))
         .route("/api/v1/portfolio/payoff", post(payoff::post_payoff))
+        .route("/api/v1/payoff/preview", post(payoff::post_payoff))
         .route(
             "/api/v1/portfolio/greeks",
             get(positions::get_portfolio_greeks),

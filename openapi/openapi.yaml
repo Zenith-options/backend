@@ -134,6 +134,144 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/JsonOk"
+  /api/v1/settlement/preview:
+    post:
+      operationId: previewSettlementV1
+      tags: [Trading]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SettlementPreviewRequest"
+      responses:
+        "200":
+          description: Read-only account, margin, and settlement impact preview.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SettlementPreview"
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "422":
+          $ref: "#/components/responses/ApiError"
+  /api/v1/series:
+    get:
+      operationId: listActiveSeriesV1
+      tags: [Market data]
+      responses:
+        "200":
+          description: Active, non-halted, non-expired option series.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/OptionSeries"
+  /api/v1/series/{id}/halt:
+    post:
+      operationId: haltSeriesV1
+      tags: [Trading]
+      security: [{ operatorToken: [] }]
+      parameters:
+        - $ref: "#/components/parameters/SeriesId"
+      responses:
+        "204": { description: Series halted. }
+  /api/v1/series/{id}/resume:
+    post:
+      operationId: resumeSeriesV1
+      tags: [Trading]
+      security: [{ operatorToken: [] }]
+      parameters:
+        - $ref: "#/components/parameters/SeriesId"
+      responses:
+        "204": { description: Series resumed. }
+  /api/v1/series/{id}/delist:
+    post:
+      operationId: delistSeriesV1
+      tags: [Trading]
+      security: [{ operatorToken: [] }]
+      parameters:
+        - $ref: "#/components/parameters/SeriesId"
+      responses:
+        "204": { description: Series delisted. }
+  /api/v1/series/{id}/settle:
+    post:
+      operationId: settleSeriesEarlyV1
+      tags: [Trading]
+      security: [{ operatorToken: [] }]
+      parameters:
+        - $ref: "#/components/parameters/SeriesId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [settlement_price]
+              properties:
+                settlement_price: { type: number, minimum: 0 }
+                path_high: { type: number }
+                path_low: { type: number }
+      responses:
+        "204": { description: Open positions closed and series final settlement recorded. }
+  /api/v1/series/{id}/payoff:
+    post:
+      operationId: setSeriesPayoffV1
+      tags: [Trading]
+      security: [{ operatorToken: [] }]
+      parameters:
+        - $ref: "#/components/parameters/SeriesId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetSeriesPayoffRequest"
+      responses:
+        "204": { description: Registered payoff formula assigned to series. }
+  /api/v1/payoff/registry/{kind}:
+    post:
+      operationId: configurePayoffFormulaV1
+      tags: [Trading]
+      security: [{ operatorToken: [] }]
+      parameters:
+        - name: kind
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [vanilla, digital, barrier, spread, capped, floor]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [config, enabled]
+              properties:
+                config: { type: object }
+                enabled: { type: boolean }
+      responses:
+        "204": { description: Registered payoff formula updated. }
+  /api/v1/payoff/preview:
+    post:
+      operationId: previewPayoffV1
+      tags: [Portfolio]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PayoffPreviewRequest"
+      responses:
+        "200":
+          description: Payoff evaluated with the registered formula.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PayoffPreview"
   /api/v2/chain:
     get:
       operationId: getOptionChainV2
@@ -685,6 +823,10 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
+    operatorToken:
+      type: apiKey
+      in: header
+      name: x-operator-token
   parameters:
     Underlying:
       name: underlying
@@ -696,6 +838,11 @@ components:
       in: path
       required: true
       schema: { type: string }
+    SeriesId:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, format: int64 }
     Strike:
       name: strike
       in: query
@@ -730,6 +877,78 @@ components:
           schema:
             $ref: "#/components/schemas/ApiError"
   schemas:
+    SettlementPreviewRequest:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [open, close, exercise, deposit, withdraw, substitution, assigned_settlement]
+        position_id: { type: string }
+        underlying: { type: string }
+        strike: { type: number, minimum: 0, exclusiveMinimum: true }
+        expiry_days: { type: number, minimum: 0, exclusiveMinimum: true }
+        option_type: { type: string, enum: [call, put] }
+        position_type: { type: string, enum: [long, short] }
+        contracts: { type: number, minimum: 0, exclusiveMinimum: true }
+        amount: { type: number, minimum: 0, exclusiveMinimum: true }
+    SettlementPreview:
+      type: object
+      required: [action, cash_delta, collateral_delta, current_margin, post_action_margin, violations, estimates_unavailable]
+      properties:
+        action: { type: string }
+        spot: { type: number, nullable: true }
+        option_premium: { type: number, nullable: true }
+        cash_delta: { type: number }
+        collateral_delta: { type: number }
+        current_margin: { type: number, nullable: true }
+        post_action_margin: { type: number, nullable: true }
+        estimated_fee: { type: number, nullable: true }
+        estimated_gas_units: { type: integer, nullable: true }
+        violations:
+          type: array
+          items: { type: string }
+        estimates_unavailable:
+          type: array
+          items: { type: string }
+    OptionSeries:
+      type: object
+      required: [id, underlying, strike, expiry, option_type, instrument_id, payoff_kind]
+      properties:
+        id: { type: integer, format: int64 }
+        underlying: { type: string }
+        strike: { type: number }
+        expiry: { type: string, format: date }
+        option_type: { type: string, enum: [call, put] }
+        instrument_id: { type: string }
+        payoff_kind: { type: string }
+    PayoffPreviewRequest:
+      type: object
+      required: [underlying_price, strike, option_type]
+      properties:
+        payoff_kind: { type: string, enum: [vanilla, digital, barrier, spread, capped, floor] }
+        series_id: { type: integer, format: int64 }
+        underlying_price: { type: number, minimum: 0 }
+        strike: { type: number, minimum: 0, exclusiveMinimum: true }
+        option_type: { type: string, enum: [call, put] }
+        contracts: { type: number, minimum: 0, exclusiveMinimum: true, default: 1 }
+        path_high: { type: number }
+        path_low: { type: number }
+    PayoffPreview:
+      type: object
+      required: [payoff_kind, underlying_price, payoff_per_contract, total_payoff]
+      properties:
+        series_id: { type: integer, format: int64, nullable: true }
+        payoff_kind: { type: string }
+        underlying_price: { type: number }
+        payoff_per_contract: { type: number }
+        total_payoff: { type: number }
+    SetSeriesPayoffRequest:
+      type: object
+      required: [payoff_kind, config]
+      properties:
+        payoff_kind: { type: string, enum: [vanilla, digital, barrier, spread, capped, floor] }
+        config: { type: object }
     JsonObject:
       type: object
       additionalProperties: true
