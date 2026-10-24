@@ -28,6 +28,7 @@ pub mod preview;
 pub mod series_lifecycle;
 pub mod positions;
 pub mod protocol_params;
+pub mod public_api;
 pub mod prices;
 pub mod rate_limit_key;
 pub mod rewards;
