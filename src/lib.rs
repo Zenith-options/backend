@@ -16,6 +16,7 @@ pub mod alerts;
 pub mod abuse;
 pub mod audit;
 pub mod auth;
+pub mod chain;
 pub mod collateral;
 pub mod db;
 pub mod error;
@@ -24,6 +25,8 @@ pub mod governance;
 pub mod math_fixed;
 pub mod margin_fixed;
 pub mod models;
+pub mod outbox;
+pub mod pagination;
 pub mod payoff;
 pub mod preview;
 pub mod series_lifecycle;
@@ -260,6 +263,11 @@ pub struct AppState {
     /// expected and ignored — the simulator runs regardless of whether
     /// anyone's listening.
     pub spot_tx: tokio::sync::broadcast::Sender<String>,
+    /// HMAC key used to sign and verify opaque keyset-pagination cursors.
+    /// Loaded from `ZENITH_CURSOR_SECRET` when set; otherwise a fixed
+    /// development default is used so local runs and tests work without
+    /// configuration. Production deployments must set the env var.
+    pub cursor_secret: Arc<Vec<u8>>,
 }
 
 impl AppState {
@@ -278,11 +286,16 @@ impl AppState {
 
         let (spot_tx, _) = tokio::sync::broadcast::channel(16);
 
+        let cursor_secret = std::env::var("ZENITH_CURSOR_SECRET")
+            .map(|s| s.into_bytes())
+            .unwrap_or_else(|_| b"zenith-dev-cursor-secret".to_vec());
+
         Self {
             spot_prices: Arc::new(std::sync::Mutex::new(prices)),
             vol_surface: Arc::new(std::sync::Mutex::new(vols)),
             db,
             spot_tx,
+            cursor_secret: Arc::new(cursor_secret),
         }
     }
 }
@@ -738,11 +751,36 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/strategies", get(strategies::list_strategies))
         .route("/api/v1/strategies/:id", get(strategies::get_strategy))
         .route("/api/v1/ws/spot", get(prices::ws_spot))
-        .route("/api/v1/portfolio/payoff", post(payoff::post_payoff))
+        .route("/api/v1/portfolio/payoff", post(payoff::post_portfolio_payoff))
         .route("/api/v1/payoff/preview", post(payoff::post_payoff))
         .route(
             "/api/v1/portfolio/greeks",
             get(positions::get_portfolio_greeks),
+        )
+        // ── Merkle-commitment batch settlement (#196) ──────────────────────
+        .route(
+            "/api/v1/settlement/batches",
+            post(chain::settlement::plan_batch),
+        )
+        .route(
+            "/api/v1/settlement/batches/:id",
+            get(chain::settlement::get_batch),
+        )
+        .route(
+            "/api/v1/settlement/batches/:id/commit",
+            post(chain::settlement::commit_batch),
+        )
+        .route(
+            "/api/v1/settlement/batches/:id/leaves",
+            get(chain::settlement::list_leaves),
+        )
+        .route(
+            "/api/v1/settlement/batches/:id/leaves/:position_id/proof",
+            get(chain::settlement::get_proof),
+        )
+        .route(
+            "/api/v1/settlement/batches/:id/claims",
+            post(chain::settlement::claim),
         )
         .layer(PropagateRequestIdLayer::new(request_id_header()))
         .layer(TraceLayer::new_for_http())

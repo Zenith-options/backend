@@ -36,21 +36,6 @@
 //! (open/close/roll/strategy execution) can select a model per environment
 //! via a feature flag.
 
-use rust_decimal::Decimal;
-use rust_decimal::RoundingStrategy;
-
-/// Fixed-point monetary amount backed by `rust_decimal::Decimal`.
-///
-/// Display uses banker's rounding; fees and collateral use
-/// round-against-the-user (see [`Money::round_against_user`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Money(Decimal);
-
-impl Money {
-    /// Explicit conversion boundary from the `f64` pricing math.
-    ///
-    /// Returns `None` for NaN and ±Inf so callers can surface
-
 /// A single option leg held by a wallet, as seen by the margin engine.
 ///
 /// `contracts` is signed: positive for long, negative for short. `strike`
@@ -123,6 +108,8 @@ impl MarginModel for StrategyBasedMargin {
         for p in positions {
             let c = if p.contracts < 0.0 {
                 collateral_required(&p.option_type, -p.contracts, p.strike, p.spot)
+                    .map(|m| m.to_f64())
+                    .unwrap_or(0.0)
             } else {
                 0.0
             };
@@ -208,83 +195,7 @@ fn option_value(option_type: &str, spot: f64, strike: f64, vol: f64) -> f64 {
     intrinsic + time_value
 }
 
-use rust_decimal::Decimal;
-use rust_decimal::RoundingStrategy;
-
-/// Fixed-point monetary amount backed by `rust_decimal::Decimal`.
-///
-/// Display uses banker's rounding; fees and collateral use
-/// round-against-the-user (see [`Money::round_against_user`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Money(Decimal);
-
-impl Money {
-    /// Explicit conversion boundary from the `f64` pricing math.
-    ///
-    /// Returns `None` for NaN and ±Inf so callers can surface
-
-use rust_decimal::Decimal;
-use rust_decimal::RoundingStrategy;
-
-/// Fixed-point monetary amount backed by `rust_decimal::Decimal`.
-///
-/// Display uses banker's rounding; fees and collateral use
-/// round-against-the-user (see [`Money::round_against_user`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Money(Decimal);
-
-impl Money {
-    /// Explicit conversion boundary from the `f64` pricing math.
-    ///
-    /// Returns `None` for NaN and ±Inf so callers can surface an error
-    /// instead of silently propagating a non-finite balance.
-    pub fn from_price(value: f64) -> Option<Self> {
-        if !value.is_finite() {
-            return None;
-        }
-        Decimal::from_f64_retain(value).map(Money)
-    }
-
-    /// Round-against-the-user: round away from zero to `scale` decimal
-    /// places. Used for fees and collateral so the protocol never loses.
-    pub fn round_against_user(self, scale: u32) -> Self {
-        Money(self.0.round_dp_with_strategy(
-            scale,
-            RoundingStrategy::AwayFromZero,
-        ))
-    }
-
-    /// Banker's rounding (round-half-to-even) for display purposes.
-    pub fn round_for_display(self, scale: u32) -> Self {
-        Money(self.0.round_dp_with_strategy(
-            scale,
-            RoundingStrategy::ToEven,
-        ))
-    }
-
-    /// Checked multiplication; returns `None` on overflow instead of panicking.
-    pub fn checked_mul(self, rhs: Self) -> Option<Self> {
-        self.0.checked_mul(rhs.0).map(Money)
-    }
-
-    /// Checked addition; returns `None` on overflow instead of panicking.
-    pub fn checked_add(self, rhs: Self) -> Option<Self> {
-        self.0.checked_add(rhs.0).map(Money)
-    }
-
-    /// The underlying decimal value.
-    pub fn value(self) -> Decimal {
-        self.0
-    }
-}
-
-impl std::fmt::Display for Money {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Banker's rounding for display, then render as a plain string so
-        // JSON consumers never see a JS float precision artifact.
-        write!(f, "{}", self.round_for_display(7).0)
-    }
-}
+pub use crate::models::Money;
 
 /// Collateral required to write an option, as fixed-point [`Money`].
 ///
@@ -297,14 +208,14 @@ pub fn collateral_required(
     strike: f64,
     spot: f64,
 ) -> Option<Money> {
-    let contracts = Money::from_price(contracts)?;
+    let contracts = Money::from_price(contracts).ok()?;
     if option_type == "call" {
-        let spot = Money::from_price(spot)?;
+        let spot = Money::from_price(spot).ok()?;
         contracts.checked_mul(spot)
     } else {
-        let strike = Money::from_price(strike)?;
+        let strike = Money::from_price(strike).ok()?;
         // 110% over-collateralization, expressed exactly as a decimal.
-        let buffer = Money::from_price(1.1)?;
+        let buffer = Money::from_price(1.1).ok()?;
         contracts.checked_mul(strike)?.checked_mul(buffer)
     }
     .map(|m| m.round_against_user(7))
@@ -356,7 +267,9 @@ pub fn remargin_action(
     locked: f64,
     config: &RemarginConfig,
 ) -> RemarginAction {
-    let required = collateral_required(option_type, contracts, strike, spot);
+    let required = collateral_required(option_type, contracts, strike, spot)
+        .map(|m| m.to_f64())
+        .unwrap_or(0.0);
     let drift = required - locked;
 
     if locked <= 0.0 {
@@ -388,15 +301,28 @@ pub fn remargin_action(
 pub async fn check_collateral_sum(
     db: &sqlx::SqlitePool,
 ) -> Result<Vec<(String, f64, f64)>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT a.wallet_address, a.collateral_locked, COALESCE(SUM(p.collateral), 0.0)
+    // Money columns are stored as INTEGER scaled by 10^7; divide back into
+    // f64 at the SQL boundary so the diagnostic speaks in display units.
+    let rows: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT a.wallet_address, a.collateral_locked, COALESCE(SUM(p.collateral), 0)
            FROM accounts a
            LEFT JOIN positions p ON p.wallet_address = a.wallet_address AND p.status = 'open'
           GROUP BY a.wallet_address, a.collateral_locked
-         HAVING a.collateral_locked != COALESCE(SUM(p.collateral), 0.0)",
+         HAVING a.collateral_locked != COALESCE(SUM(p.collateral), 0)",
     )
     .fetch_all(db)
-    .await
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(wallet, locked, sum)| {
+            (
+                wallet,
+                crate::models::Money::from_scaled_i64(locked).to_f64(),
+                crate::models::Money::from_scaled_i64(sum).to_f64(),
+            )
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -421,14 +347,14 @@ mod tests {
     fn rejects_nan_and_inf() {
         assert!(collateral_required("call", f64::NAN, 70000.0, 67420.50).is_none());
         assert!(collateral_required("call", 2.0, 70000.0, f64::INFINITY).is_none());
-        assert!(Money::from_price(f64::NEG_INFINITY).is_none());
+        assert!(Money::from_price(f64::NEG_INFINITY).is_err());
     }
 
     #[test]
     fn collateral_rounds_against_the_user() {
         // 1 contract * 0.00000001 strike * 1.1 = 0.000000011 -> rounds up to 1e-7.
         let got = collateral_required("put", 1.0, 0.00000001, 1.0).unwrap();
-        assert_eq!(got.value(), rust_decimal::dec!(0.0000001));
+        assert_eq!(got.as_decimal(), rust_decimal::Decimal::new(1, 7));
     }
 
     #[test]
@@ -468,7 +394,7 @@ mod tests {
             std::env::temp_dir().join(format!("zenith-collateral-test-{}.db", uuid::Uuid::new_v4()));
         let pool = crate::db::init_pool(&format!("sqlite://{}", db_path.display())).await;
 
-        sqlx::query("INSERT INTO accounts (wallet_address, collateral_locked) VALUES ('GTEST', 100)")
+        sqlx::query("INSERT INTO accounts (wallet_address, collateral_locked) VALUES ('GTEST', 1000000000)")
             .execute(&pool)
             .await
             .unwrap();
@@ -476,7 +402,7 @@ mod tests {
             "INSERT INTO positions
                 (id, wallet_address, underlying, strike, expiry_days, option_type,
                  position_type, contracts, entry_premium, entry_spot, collateral, status)
-             VALUES ('p1', 'GTEST', 'BTC', 70000, 30, 'call', 'short', 1, 100, 67000, 100, 'open')",
+             VALUES ('p1', 'GTEST', 'BTC', 700000000000, 30, 'call', 'short', 10000000, 1000000000, 670000000000, 1000000000, 'open')",
         )
         .execute(&pool)
         .await
@@ -487,7 +413,7 @@ mod tests {
         assert!(drift.is_empty(), "no drift expected: {drift:?}");
 
         // Simulate corruption outside the app's transactional open/close path.
-        sqlx::query("UPDATE accounts SET collateral_locked = 50 WHERE wallet_address = 'GTEST'")
+        sqlx::query("UPDATE accounts SET collateral_locked = 500000000 WHERE wallet_address = 'GTEST'")
             .execute(&pool)
             .await
             .unwrap();
@@ -589,7 +515,5 @@ mod tests {
         }];
         assert!(RiskArrayMargin.exceeds_equity(&positions, 1.0));
         assert!(!RiskArrayMargin.exceeds_equity(&positions, 1e12));
-    }
-
     }
 }

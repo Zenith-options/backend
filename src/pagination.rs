@@ -134,7 +134,7 @@ fn sign(secret: &[u8], filters: &str, encoded: &str) -> Result<String, ApiError>
     let mut mac = HmacSha256::new_from_slice(secret)
         .map_err(|_| ApiError::internal("invalid cursor signing key"))?;
     mac.update(filters.as_bytes());
-    mac.update(b"\u{1f}");
+    mac.update(b"\x1f");
     mac.update(encoded.as_bytes());
     Ok(URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
 }

@@ -55,12 +55,7 @@ pub struct DecodedError {
 }
 
 impl DecodedError {
-    fn new(
-        code: ApiErrorCode,
-        message: &str,
-        remediation: &str,
-        raw_code: Option<u32>,
-    ) -> Self {
+    fn new(code: ApiErrorCode, message: &str, remediation: &str, raw_code: Option<u32>) -> Self {
         Self {
             code,
             message: message.to_string(),
@@ -130,12 +125,7 @@ pub fn map_contract_error(contract_code: u32) -> DecodedError {
         .iter()
         .find(|m| m.contract_code == contract_code)
     {
-        Some(m) => DecodedError::new(
-            m.api_code,
-            m.message,
-            m.remediation,
-            Some(contract_code),
-        ),
+        Some(m) => DecodedError::new(m.api_code, m.message, m.remediation, Some(contract_code)),
         None => DecodedError::new(
             ApiErrorCode::Unknown,
             "Unrecognized contract error",

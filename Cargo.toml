@@ -11,6 +11,10 @@ debug = true
 name = "zenith-backend"
 version = "0.1.0"
 edition = "2021"
+# Only the explicitly declared `zenith-backend` binary is built. The
+# `src/bin/*.rs` admin/OpenAPI helpers depend on tooling (utoipa, anyhow,
+# a Postgres sqlx driver) that is not part of this crate's dependency set.
+autobins = false
 
 # Only the targets declared below are built. `src/bin/` also holds tool
 # scripts from earlier iterations that were never wired into this package's
@@ -41,6 +45,11 @@ hmac = "0.12"
 sha2 = "0.10"
 async-trait = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+chrono = "0.4"
+base64 = "0.22"
+futures = "0.3"
+rust_decimal = "1"
+validator = { version = "0.18", features = ["derive"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
