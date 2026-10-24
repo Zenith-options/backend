@@ -9,6 +9,7 @@ pub mod contracts;
 pub mod errors;
 pub mod event_indexer;
 pub mod fees;
+pub mod assets;
 pub mod handlers;
 pub mod indexer;
 pub mod limits;

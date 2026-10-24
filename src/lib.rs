@@ -299,6 +299,7 @@ pub struct AppState {
     pub vol_surface: Arc<std::sync::Mutex<std::collections::HashMap<String, f64>>>,
     pub db: sqlx::SqlitePool,
     pub price_source: Arc<dyn price_sources::PriceSource>,
+    pub assets: crate::chain::assets::AssetRegistry,
     pub spot_tx: tokio::sync::broadcast::Sender<String>,
     /// HMAC key used to sign and verify opaque keyset-pagination cursors.
     /// Loaded from `ZENITH_CURSOR_SECRET` when set; otherwise a fixed
@@ -328,6 +329,7 @@ impl AppState {
             spot_prices: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             price_ticks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             vol_surface: Arc::new(std::sync::Mutex::new(vols)),
+            assets: crate::chain::assets::AssetRegistry::new(db.clone()),
             db,
             price_source,
             spot_tx,
@@ -893,6 +895,8 @@ pub fn build_router_with_market_maker(
         )
         .with_state(state)
         .merge(market_maker::routes(market_maker_state))
+        .route("/api/v1/assets", get(chain::assets::list_assets))
+        .route("/api/v1/assets/all", get(chain::assets::list_all_assets))
         .layer(PropagateRequestIdLayer::new(request_id_header()))
         .layer(axum::middleware::from_fn(
             api_version::negotiate_version,
