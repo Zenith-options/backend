@@ -1,8 +1,11 @@
 pub mod accounts;
+pub mod collateral_vault;
 pub mod config;
 pub mod contracts;
 pub mod event_indexer;
 pub mod oracle_policy;
+pub mod reconciliation_policy;
+pub mod settlement_keeper;
 pub mod transaction;
 pub mod transport;
 pub mod xdr;

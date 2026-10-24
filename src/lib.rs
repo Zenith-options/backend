@@ -22,6 +22,7 @@ pub mod error;
 pub mod history;
 pub mod governance;
 pub mod math_fixed;
+pub mod margin_fixed;
 pub mod models;
 pub mod payoff;
 pub mod preview;
