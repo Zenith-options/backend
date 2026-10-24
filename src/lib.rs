@@ -26,6 +26,7 @@ pub mod chain_cost;
 pub mod collateral;
 pub mod db;
 pub mod error;
+pub mod expiry_assignment;
 pub mod history;
 pub mod governance;
 pub mod indexer;
@@ -44,6 +45,7 @@ pub mod series_lifecycle;
 pub mod settlement_policy;
 pub mod settlement_reports;
 pub mod positions;
+pub mod position_transfers;
 pub mod protocol_params;
 pub mod public_api;
 pub mod prices;
@@ -67,6 +69,8 @@ pub mod treasury;
 pub mod strkey;
 pub mod watchlist;
 pub mod voting_power;
+pub mod strategy_execution;
+pub mod vault_controls;
 
 // Kani proof harnesses for the fixed-point arithmetic in `math_fixed`
 // (issue #119). Only compiled under `cargo kani`, so normal builds and
