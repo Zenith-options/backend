@@ -1,19 +1,4 @@
-//! Pluggable price-feed ingestion layer.
-//!
-//! This module defines the [`PriceSource`] abstraction that replaces the
-//! seeded-constant / random-walk simulator in `prices.rs`. Concrete
-//! implementations live in sibling modules:
-//!
-//! * [`simulated`] — the deterministic random-walk source used for local
-//!   development and tests (the default).
-//! * [`http`] — an HTTP spot ticker feed (e.g. CoinGecko / Binance public
-//!   ticker) built on `reqwest` with rustls.
-//! * [`reflector`] — the Stellar Reflector oracle contract, read through the
-//!   Soroban RPC `simulateTransaction` path (`lastprice`).
-//!
-//! The active source is selected through configuration (see
-//! [`PriceSourceConfig`]); the default remains [`SimulatedSource`] so local
-//! development and the existing unit tests keep working unchanged.
+//! Observable market-price ingestion and multi-source aggregation.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,33 +7,24 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-pub mod http;
-pub mod reflector;
-pub mod simulated;
+pub mod external;
+pub mod sdex;
+pub mod soroban_pool;
 
-pub use http::HttpTickerSource;
-pub use reflector::ReflectorOracleSource;
-pub use simulated::SimulatedSource;
+pub use external::ExternalVenueSource;
+pub use sdex::{AssetId, SdexOrderBookSource};
+pub use soroban_pool::SorobanPoolSource;
 
-/// Maximum time any single fetch is allowed to take.
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// A single observed price for one symbol.
-///
-/// `source` identifies which [`PriceSource`] produced the tick and
-/// `observed_at` is the UTC timestamp at which the price was observed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PriceTick {
-    /// The observed price, expressed in quote currency per unit of the symbol.
     pub price: f64,
-    /// Human-readable identifier of the producing source (e.g. `"simulated"`).
     pub source: String,
-    /// UTC timestamp at which the price was observed.
     pub observed_at: DateTime<Utc>,
 }
 
 impl PriceTick {
-    /// Construct a new tick, stamping it with the current UTC time.
     pub fn now(price: f64, source: impl Into<String>) -> Self {
         Self {
             price,
@@ -58,102 +34,213 @@ impl PriceTick {
     }
 }
 
-/// Errors that can be produced while fetching prices.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum PriceError {
-    /// The upstream source returned a rate-limit response (HTTP 429).
-    #[error("price source rate limited")]
     RateLimited,
-    /// The upstream response could not be parsed or was malformed.
-    #[error("malformed price response: {0}")]
     Malformed(String),
-    /// The fetch exceeded the configured timeout.
-    #[error("price fetch timed out")]
     Timeout,
-    /// A transport-level failure (network, DNS, TLS, ...).
-    #[error("price source transport error: {0}")]
     Transport(String),
-    /// Any other source-specific failure.
-    #[error("price source error: {0}")]
     Other(String),
+    InsufficientSources { available: usize, required: usize },
 }
 
-/// A pluggable source of spot prices.
-///
-/// Implementations must be safe to share across tasks (`Send + Sync`) and are
-/// expected to honour [`FETCH_TIMEOUT`]. A failed fetch must return an `Err`
-/// rather than an empty map so callers can preserve the last good price.
+impl std::fmt::Display for PriceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RateLimited => f.write_str("price source rate limited"),
+            Self::Malformed(detail) => write!(f, "malformed price response: {detail}"),
+            Self::Timeout => f.write_str("price fetch timed out"),
+            Self::Transport(detail) => write!(f, "price source transport error: {detail}"),
+            Self::Other(detail) => write!(f, "price source error: {detail}"),
+            Self::InsufficientSources {
+                available,
+                required,
+            } => write!(
+                f,
+                "only {available} valid source(s) returned prices; {required} required"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PriceError {}
+
 #[async_trait::async_trait]
 pub trait PriceSource: Send + Sync {
-    /// Fetch the latest price for each requested symbol.
-    ///
-    /// Symbols that the source cannot resolve may be omitted from the returned
-    /// map; callers treat missing symbols as "no update" and keep the last
-    /// good price.
     async fn fetch(
         &self,
         symbols: &[String],
     ) -> Result<HashMap<String, PriceTick>, PriceError>;
 
-    /// Stable identifier for this source, used to populate [`PriceTick::source`]
-    /// and the `/api/v1/spot` `source` field.
     fn name(&self) -> &'static str;
 }
 
-/// Configuration selecting the active price source.
-///
-/// Read from the `PRICE_SOURCE` environment variable (case-insensitive).
-/// Unknown or unset values fall back to [`SimulatedSource`], preserving the
-/// historical local-dev / test behaviour.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PriceSourceConfig {
-    /// Deterministic random-walk simulator (default).
-    Simulated,
-    /// HTTP spot ticker feed.
-    Http { base_url: String },
-    /// Stellar Reflector oracle contract.
-    Reflector { rpc_url: String, contract_id: String },
+/// Combines independently observed quotes using a median, preventing a single
+/// venue outlier from setting the published price.
+pub struct AggregatedPriceSource {
+    sources: Vec<Arc<dyn PriceSource>>,
+    minimum_sources: usize,
 }
 
-impl Default for PriceSourceConfig {
-    fn default() -> Self {
-        PriceSourceConfig::Simulated
+impl AggregatedPriceSource {
+    pub fn new(sources: Vec<Arc<dyn PriceSource>>, minimum_sources: usize) -> Self {
+        Self {
+            sources,
+            minimum_sources: minimum_sources.max(1),
+        }
     }
+}
+
+#[async_trait::async_trait]
+impl PriceSource for AggregatedPriceSource {
+    async fn fetch(
+        &self,
+        symbols: &[String],
+    ) -> Result<HashMap<String, PriceTick>, PriceError> {
+        let mut observations: HashMap<String, Vec<PriceTick>> = HashMap::new();
+        let mut source_errors = Vec::new();
+        for source in &self.sources {
+            match tokio::time::timeout(FETCH_TIMEOUT, source.fetch(symbols)).await {
+                Ok(Ok(quotes)) => {
+                    for (symbol, quote) in quotes {
+                        if quote.price.is_finite() && quote.price > 0.0 {
+                            observations.entry(symbol).or_default().push(quote);
+                        }
+                    }
+                }
+                Ok(Err(error)) => source_errors.push(format!("{}: {error}", source.name())),
+                Err(_) => source_errors.push(format!("{}: timed out", source.name())),
+            }
+        }
+
+        let available = observations
+            .values()
+            .map(Vec::len)
+            .max()
+            .unwrap_or_default();
+        let mut aggregate = HashMap::new();
+        for (symbol, mut quotes) in observations {
+            if quotes.len() < self.minimum_sources {
+                continue;
+            }
+            quotes.sort_by(|left, right| left.price.total_cmp(&right.price));
+            let median = if quotes.len() % 2 == 0 {
+                let right = quotes.len() / 2;
+                (quotes[right - 1].price + quotes[right].price) / 2.0
+            } else {
+                quotes[quotes.len() / 2].price
+            };
+            let sources = quotes
+                .iter()
+                .map(|quote| quote.source.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            let observed_at = quotes
+                .iter()
+                .map(|quote| quote.observed_at)
+                .min()
+                .unwrap_or_else(Utc::now);
+            aggregate.insert(
+                symbol,
+                PriceTick {
+                    price: median,
+                    source: format!("median:{sources}"),
+                    observed_at,
+                },
+            );
+        }
+
+        if aggregate.is_empty() {
+            return Err(if source_errors.is_empty() {
+                PriceError::InsufficientSources {
+                    available,
+                    required: self.minimum_sources,
+                }
+            } else {
+                PriceError::Other(source_errors.join("; "))
+            });
+        }
+        Ok(aggregate)
+    }
+
+    fn name(&self) -> &'static str {
+        "market_median"
+    }
+}
+
+/// The market adapters are opt-in and require explicit asset/pool mappings.
+/// No simulated or seeded price source is selected when configuration is
+/// missing; the ingestion loop keeps its last verified tick instead.
+#[derive(Clone, Default)]
+pub struct PriceSourceConfig {
+    pub horizon_url: String,
+    pub sdex_assets: HashMap<String, (AssetId, AssetId)>,
+    pub soroban_quote_url: Option<String>,
+    pub soroban_pools: HashMap<String, String>,
+    pub external_quote_url: Option<String>,
+    pub external_symbols: HashMap<String, String>,
+    pub minimum_sources: usize,
 }
 
 impl PriceSourceConfig {
-    /// Resolve the active configuration from the environment.
-    pub fn from_env() -> Self {
-        let raw = std::env::var("PRICE_SOURCE").unwrap_or_default();
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "http" | "http_ticker" | "ticker" => PriceSourceConfig::Http {
-                base_url: std::env::var("PRICE_SOURCE_HTTP_URL")
-                    .unwrap_or_else(|_| "https://api.coingecko.com/api/v3".to_string()),
-            },
-            "reflector" | "oracle" => PriceSourceConfig::Reflector {
-                rpc_url: std::env::var("PRICE_SOURCE_RPC_URL")
-                    .unwrap_or_else(|_| "https://soroban-testnet.stellar.org".to_string()),
-                contract_id: std::env::var("PRICE_SOURCE_CONTRACT_ID").unwrap_or_default(),
-            },
-            _ => PriceSourceConfig::Simulated,
+    pub fn from_env() -> Result<Self, PriceError> {
+        fn json_map<T: for<'de> Deserialize<'de>>(
+            key: &str,
+        ) -> Result<HashMap<String, T>, PriceError> {
+            match std::env::var(key) {
+                Ok(value) => serde_json::from_str(&value)
+                    .map_err(|e| PriceError::Malformed(format!("{key}: {e}"))),
+                Err(_) => Ok(HashMap::new()),
+            }
         }
+
+        let minimum_sources = std::env::var("PRICE_MINIMUM_SOURCES")
+            .ok()
+            .map(|value| value.parse::<usize>())
+            .transpose()
+            .map_err(|e| PriceError::Malformed(format!("PRICE_MINIMUM_SOURCES: {e}")))?
+            .unwrap_or(2);
+
+        Ok(Self {
+            horizon_url: std::env::var("ZENITH_HORIZON_URL")
+                .unwrap_or_else(|_| "https://horizon-testnet.stellar.org".to_string()),
+            sdex_assets: json_map("PRICE_SDEX_ASSETS")?,
+            soroban_quote_url: std::env::var("PRICE_SOROBAN_POOL_QUOTES_URL").ok(),
+            soroban_pools: json_map("PRICE_SOROBAN_POOL_IDS")?,
+            external_quote_url: std::env::var("PRICE_EXTERNAL_QUOTES_URL").ok(),
+            external_symbols: json_map("PRICE_EXTERNAL_SYMBOLS")?,
+            minimum_sources,
+        })
     }
 
-    /// Build the concrete [`PriceSource`] described by this configuration.
     pub fn build(&self) -> Arc<dyn PriceSource> {
-        match self {
-            PriceSourceConfig::Simulated => Arc::new(SimulatedSource::default()),
-            PriceSourceConfig::Http { base_url } => {
-                Arc::new(HttpTickerSource::new(base_url.clone()))
-            }
-            PriceSourceConfig::Reflector {
-                rpc_url,
-                contract_id,
-            } => Arc::new(ReflectorOracleSource::new(
-                rpc_url.clone(),
-                contract_id.clone(),
-            )),
+        let mut sources: Vec<Arc<dyn PriceSource>> = Vec::new();
+        if !self.sdex_assets.is_empty() {
+            sources.push(Arc::new(SdexOrderBookSource::new(
+                self.horizon_url.clone(),
+                self.sdex_assets.clone(),
+            )));
         }
+        if let Some(url) = &self.soroban_quote_url {
+            if !self.soroban_pools.is_empty() {
+                sources.push(Arc::new(SorobanPoolSource::new(
+                    url.clone(),
+                    self.soroban_pools.clone(),
+                )));
+            }
+        }
+        if let Some(url) = &self.external_quote_url {
+            if !self.external_symbols.is_empty() {
+                sources.push(Arc::new(ExternalVenueSource::new(
+                    url.clone(),
+                    self.external_symbols.clone(),
+                )));
+            }
+        }
+        Arc::new(AggregatedPriceSource::new(
+            sources,
+            self.minimum_sources,
+        ))
     }
 }
 
@@ -161,23 +248,76 @@ impl PriceSourceConfig {
 mod tests {
     use super::*;
 
-    #[test]
-    fn default_config_is_simulated() {
-        assert_eq!(PriceSourceConfig::default(), PriceSourceConfig::Simulated);
+    struct FixedSource {
+        name: &'static str,
+        price: f64,
     }
 
-    #[test]
-    fn unknown_env_falls_back_to_simulated() {
-        std::env::set_var("PRICE_SOURCE", "definitely-not-a-source");
-        assert_eq!(PriceSourceConfig::from_env(), PriceSourceConfig::Simulated);
-        std::env::remove_var("PRICE_SOURCE");
+    #[async_trait::async_trait]
+    impl PriceSource for FixedSource {
+        async fn fetch(
+            &self,
+            symbols: &[String],
+        ) -> Result<HashMap<String, PriceTick>, PriceError> {
+            Ok(symbols
+                .iter()
+                .map(|symbol| {
+                    (
+                        symbol.clone(),
+                        PriceTick::now(self.price, self.name),
+                    )
+                })
+                .collect())
+        }
+
+        fn name(&self) -> &'static str {
+            self.name
+        }
     }
 
-    #[test]
-    fn tick_now_stamps_source_and_time() {
-        let tick = PriceTick::now(123.4, "simulated");
-        assert_eq!(tick.price, 123.4);
-        assert_eq!(tick.source, "simulated");
-        assert!(tick.observed_at <= Utc::now());
+    #[tokio::test]
+    async fn median_aggregates_market_quotes_and_rejects_bad_values() {
+        let aggregator = AggregatedPriceSource::new(
+            vec![
+                Arc::new(FixedSource {
+                    name: "sdex",
+                    price: 99.0,
+                }),
+                Arc::new(FixedSource {
+                    name: "amm",
+                    price: 100.0,
+                }),
+                Arc::new(FixedSource {
+                    name: "venue",
+                    price: 1_000.0,
+                }),
+                Arc::new(FixedSource {
+                    name: "bad",
+                    price: f64::NAN,
+                }),
+            ],
+            3,
+        );
+        let result = aggregator.fetch(&["XLM".to_string()]).await.unwrap();
+        assert_eq!(result["XLM"].price, 100.0);
+        assert_eq!(result["XLM"].source, "median:sdex,amm,venue");
+    }
+
+    #[tokio::test]
+    async fn requires_multiple_observations_per_symbol() {
+        let aggregator = AggregatedPriceSource::new(
+            vec![Arc::new(FixedSource {
+                name: "only",
+                price: 1.0,
+            })],
+            2,
+        );
+        assert!(matches!(
+            aggregator.fetch(&["XLM".into()]).await,
+            Err(PriceError::InsufficientSources {
+                available: 0,
+                required: 2
+            })
+        ));
     }
 }

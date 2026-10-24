@@ -6,7 +6,20 @@ use zenith_backend::chain::tx_builder::TxBuilder;
 
 #[tokio::test]
 async fn test_wallet_readiness_unfunded_account() {
-    let client = HorizonClient::new("https://horizon-testnet.stellar.org".into());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            axum::Router::new().route(
+                "/accounts/:wallet",
+                axum::routing::get(|| async { axum::http::StatusCode::NOT_FOUND }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+    let client = HorizonClient::new(format!("http://{address}"));
     let report = check_wallet_readiness(
         &client,
         "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",

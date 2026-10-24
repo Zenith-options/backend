@@ -29,6 +29,7 @@ pub mod transport;
 pub mod xdr;
 pub mod authorization;
 pub mod bindings;
+pub mod errors;
 pub mod horizon;
 pub mod readiness;
 pub mod relayer;

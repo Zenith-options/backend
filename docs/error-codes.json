@@ -10,5 +10,16 @@
   {"code":"RATE_LIMITED","http_status":429,"description":"The caller exceeded the configured request rate."},
   {"code":"SERVICE_UNAVAILABLE","http_status":503,"description":"A required dependency is unavailable."},
   {"code":"UNAUTHENTICATED","http_status":401,"description":"Authentication is missing, invalid, expired, or failed."},
-  {"code":"UNPROCESSABLE_ENTITY","http_status":422,"description":"The request is syntactically valid but cannot be processed."}
+  {"code":"UNPROCESSABLE_ENTITY","http_status":422,"description":"The request is syntactically valid but cannot be processed."},
+  {"code":"INSUFFICIENT_COLLATERAL","http_status":422,"description":"Insufficient collateral for the requested action.","contract_code":1},
+  {"code":"SERIES_EXPIRED","http_status":409,"description":"The referenced series has expired.","contract_code":2},
+  {"code":"SERIES_NOT_FOUND","http_status":404,"description":"The referenced series does not exist.","contract_code":3},
+  {"code":"MISSING_TRUSTLINE","http_status":422,"description":"A required trustline is missing.","contract_code":4},
+  {"code":"UNAUTHORIZED","http_status":403,"description":"The caller is not authorized for this action.","contract_code":5},
+  {"code":"BUDGET_EXCEEDED","http_status":422,"description":"The transaction would exceed the network CPU instruction budget."},
+  {"code":"STORAGE_ARCHIVED","http_status":422,"description":"A storage entry required by the transaction has been archived."},
+  {"code":"AUTH_FAILURE","http_status":403,"description":"Soroban authentication requirements were not satisfied."},
+  {"code":"RPC_METHOD_UNSUPPORTED","http_status":503,"description":"The Soroban RPC endpoint does not support the requested method.","rpc_code":-32601},
+  {"code":"RPC_UNAVAILABLE","http_status":503,"description":"The Soroban RPC endpoint could not complete the request.","rpc_code":-32603},
+  {"code":"UNKNOWN","http_status":500,"description":"An unrecognized contract, host, or RPC failure occurred."}
 ]

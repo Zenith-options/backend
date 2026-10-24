@@ -64,7 +64,7 @@ impl OperationalState {
 
     pub fn background_loop_health(&self) -> Vec<(&'static str, bool)> {
         let loops = self.background_loops.lock().unwrap();
-        ["auth_cleanup", "alert_checks", "price_simulator"]
+        ["auth_cleanup", "alert_checks", "price_ingestion"]
             .into_iter()
             .map(|name| {
                 let healthy = loops.get(name).is_some_and(|status| {
@@ -190,7 +190,7 @@ async fn dependency_statuses(state: &AppState) -> HashMap<String, DependencyStat
     );
 
     let loops = state.operations.background_loops.lock().unwrap().clone();
-    for name in ["auth_cleanup", "alert_checks", "price_simulator"] {
+    for name in ["auth_cleanup", "alert_checks", "price_ingestion"] {
         let loop_status = loops.get(name);
         let fresh = loop_status
             .and_then(|status| status.last_success)

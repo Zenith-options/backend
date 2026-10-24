@@ -24,6 +24,8 @@ use super::types::{
 };
 
 /// A ledger entry key with its live-until information.
+use super::errors::{map_contract_error, ApiErrorCode};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LedgerEntryInfo {
     pub key: String,
@@ -491,3 +493,88 @@ impl SorobanRpcClient {
         Ok(result)
     }
 }
+
+/// Decode a Soroban simulation error string into a contract error code and a
+/// human-readable message. Soroban encodes contract failures as
+/// `Error(Contract, #<code>)`; anything else is passed through verbatim.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractError {
+    pub code: Option<u32>,
+    pub api_code: ApiErrorCode,
+    pub http_status: u16,
+    pub message: String,
+    pub remediation: String,
+}
+
+fn decode_contract_error(raw: &str) -> ContractError {
+    let code = raw
+        .contains("Error(Contract,")
+        .then(|| {
+            raw.split('#')
+                .nth(1)
+                .and_then(|s| s.trim_end_matches(')').trim().parse::<u32>().ok())
+        })
+        .flatten();
+
+    let decoded = code.map(map_contract_error);
+    let (api_code, http_status, message, remediation) = match decoded {
+        Some(decoded) => (
+            decoded.code,
+            decoded.http_status,
+            format!("{}: {raw}", decoded.message),
+            decoded.remediation,
+        ),
+        None => (
+            ApiErrorCode::Unknown,
+            500,
+            raw.to_string(),
+            "Inspect the raw Soroban error and consult the contract and host error catalogue."
+                .to_string(),
+        ),
+    };
+    ContractError {
+        code,
+        api_code,
+        http_status,
+        message,
+        remediation,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn next_sequence_increments_current() {
+        let info = AccountInfo {
+            account_id: "GABC".into(),
+            sequence: "42".into(),
+        };
+        assert_eq!(info.next_sequence().unwrap(), 43);
+    }
+
+    #[test]
+    fn decodes_contract_error_code() {
+        let err = decode_contract_error("HostError: Error(Contract, #12)");
+        assert_eq!(err.code, Some(12));
+        assert_eq!(err.api_code, ApiErrorCode::Unknown);
+        assert!(err.message.contains("#12"));
+    }
+
+    #[test]
+    fn exposes_catalogue_code_for_known_contract_errors() {
+        let err = decode_contract_error("HostError: Error(Contract, #1)");
+        assert_eq!(err.api_code, ApiErrorCode::InsufficientCollateral);
+        assert_eq!(err.http_status, 422);
+    }
+
+    #[test]
+    fn decodes_non_contract_error() {
+        let err = decode_contract_error("HostError: Error(WasmVm, MissingValue)");
+        assert_eq!(err.code, None);
+        assert_eq!(err.message, "HostError: Error(WasmVm, MissingValue)");
+        assert_eq!(err.api_code, ApiErrorCode::Unknown);
+    }
+}
+

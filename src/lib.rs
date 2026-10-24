@@ -47,6 +47,7 @@ pub mod positions;
 pub mod protocol_params;
 pub mod public_api;
 pub mod prices;
+pub mod price_sources;
 pub mod quotes;
 pub mod rate_limit_key;
 pub mod rewards;
@@ -58,6 +59,7 @@ pub mod security_policy;
 pub mod settlement_notifications;
 pub mod settlement_price;
 pub mod settlement_saga;
+pub mod session_keys;
 pub mod signing;
 pub mod soroban;
 pub mod strategies;
@@ -273,14 +275,12 @@ pub fn implied_vol(
 #[derive(Clone)]
 pub struct AppState {
     pub spot_prices: Arc<std::sync::Mutex<std::collections::HashMap<String, f64>>>,
+    pub price_ticks: Arc<
+        std::sync::Mutex<std::collections::HashMap<String, price_sources::PriceTick>>,
+    >,
     pub vol_surface: Arc<std::sync::Mutex<std::collections::HashMap<String, f64>>>,
     pub db: sqlx::SqlitePool,
-    pub cursor_secret: String,
-    /// Broadcasts a JSON-encoded SpotResponse every time the price
-    /// simulator nudges spot_prices, for the /api/v1/ws/spot handler to
-    /// forward to connected clients. `send` errors (no receivers) are
-    /// expected and ignored — the simulator runs regardless of whether
-    /// anyone's listening.
+    pub price_source: Arc<dyn price_sources::PriceSource>,
     pub spot_tx: tokio::sync::broadcast::Sender<String>,
     /// HMAC key used to sign and verify opaque keyset-pagination cursors.
     /// Loaded from `ZENITH_CURSOR_SECRET` when set; otherwise a fixed
@@ -291,12 +291,6 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(db: sqlx::SqlitePool) -> Self {
-        let mut prices = std::collections::HashMap::new();
-        prices.insert("XLM".into(), 0.1182);
-        prices.insert("BTC".into(), 67420.50);
-        prices.insert("ETH".into(), 3512.80);
-        prices.insert("SOL".into(), 182.45);
-
         let mut vols = std::collections::HashMap::new();
         vols.insert("XLM".into(), 0.82); // 82% ann vol
         vols.insert("BTC".into(), 0.65);
@@ -304,16 +298,20 @@ impl AppState {
         vols.insert("SOL".into(), 0.91);
 
         let (spot_tx, _) = tokio::sync::broadcast::channel(16);
+        let price_source = price_sources::PriceSourceConfig::from_env()
+            .expect("invalid price-source configuration")
+            .build();
 
         let cursor_secret = std::env::var("ZENITH_CURSOR_SECRET")
             .map(|s| s.into_bytes())
             .unwrap_or_else(|_| b"zenith-dev-cursor-secret".to_vec());
 
         Self {
-            spot_prices: Arc::new(std::sync::Mutex::new(prices)),
+            spot_prices: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            price_ticks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             vol_surface: Arc::new(std::sync::Mutex::new(vols)),
             db,
-            cursor_secret: std::env::var("CURSOR_SECRET").unwrap_or_else(|_| "zenith-cursor-secret".to_string()),
+            price_source,
             spot_tx,
             cursor_secret: Arc::new(cursor_secret),
         }
@@ -379,6 +377,7 @@ pub struct ExpiryInfo {
 pub struct SpotResponse {
     pub prices: std::collections::HashMap<String, f64>,
     pub vols: std::collections::HashMap<String, f64>,
+    pub sources: std::collections::HashMap<String, String>,
 }
 
 // ─── Route Handlers ───────────────────────────────────────────────────────────
@@ -408,7 +407,18 @@ async fn health(State(state): State<AppState>) -> Result<Json<serde_json::Value>
 async fn get_spot(State(state): State<AppState>) -> Json<SpotResponse> {
     let prices = state.spot_prices.lock().unwrap().clone();
     let vols = state.vol_surface.lock().unwrap().clone();
-    Json(SpotResponse { prices, vols })
+    let sources = state
+        .price_ticks
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(symbol, tick)| (symbol.clone(), tick.source.clone()))
+        .collect();
+    Json(SpotResponse {
+        prices,
+        vols,
+        sources,
+    })
 }
 
 async fn price_option(
@@ -622,7 +632,7 @@ pub fn now_unix() -> i64 {
 
 /// Opens the database (from DATABASE_URL / .env, default sqlite://zenith.db)
 /// and spawns the background loops (auth cleanup, alert checks, price
-/// simulator) against it.
+/// ingestion) against it.
 pub async fn init_state() -> AppState {
     dotenvy::dotenv().ok();
     let database_url =
@@ -632,7 +642,7 @@ pub async fn init_state() -> AppState {
     let state = AppState::new(pool);
     tokio::spawn(auth::cleanup_expired_loop(state.db.clone()));
     tokio::spawn(alerts::check_alerts_loop(state.clone()));
-    tokio::spawn(prices::price_simulator_loop(state.clone()));
+    tokio::spawn(prices::price_ingestion_loop(state.clone()));
     state
 }
 
@@ -719,6 +729,18 @@ fn mutation_rate_limited_routes() -> Router<AppState> {
         .route("/api/v1/rfqs/:id/quotes", post(rfq::submit_quote))
         .route("/api/v1/rfqs/:id/accept", post(rfq::accept_quote))
         .route("/api/v1/rfqs/:id/cancel", post(rfq::cancel_rfq))
+        .route(
+            "/api/v1/session-keys/challenges",
+            post(session_keys::create_challenge),
+        )
+        .route(
+            "/api/v1/session-keys",
+            post(session_keys::confirm).get(session_keys::list),
+        )
+        .route(
+            "/api/v1/session-keys/:id",
+            axum::routing::delete(session_keys::revoke),
+        )
         .layer(GovernorLayer { config })
 }
 
@@ -729,7 +751,7 @@ fn request_id_header() -> axum::http::HeaderName {
 pub fn build_router(state: AppState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
         .allow_headers(Any);
 
     Router::new()

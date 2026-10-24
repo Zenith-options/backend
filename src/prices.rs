@@ -70,101 +70,52 @@ async fn handle_spot_socket(mut socket: WebSocket, state: AppState) {
                     }
                     // Client fell behind the broadcast buffer — resync with a
                     // fresh snapshot rather than sending stale skipped ticks.
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+
+use std::time::Duration;
+use crate::price_sources::PriceSource;
+
+const SYMBOLS: &[&str] = &["XLM", "BTC", "ETH", "SOL"];
+
+pub async fn price_ingestion_loop(state: crate::AppState) {
+    let symbols = SYMBOLS
+        .iter()
+        .map(|symbol| (*symbol).to_string())
+        .collect::<Vec<_>>();
+    loop {
+        match state.price_source.fetch(&symbols).await {
+            Ok(quotes) => {
+                let mut prices = state.spot_prices.lock().unwrap();
+                let mut ticks = state.price_ticks.lock().unwrap();
+                for (symbol, tick) in quotes {
+                    if !tick.price.is_finite() || tick.price <= 0.0 {
+                        tracing::warn!(symbol, "ignoring invalid observed market price");
+                        continue;
+                    }
+                    prices.insert(symbol.clone(), tick.price);
+                    ticks.insert(symbol, tick);
+                }
+                let payload = crate::SpotResponse {
+                    prices: prices.clone(),
+                    vols: state.vol_surface.lock().unwrap().clone(),
+                    sources: ticks
+                        .iter()
+                        .map(|(symbol, tick)| (symbol.clone(), tick.source.clone()))
+                        .collect(),
+                };
+                match serde_json::to_string(&payload) {
+                    Ok(encoded) => {
+                        let _ = state.spot_tx.send(encoded);
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "could not serialize market-price update");
+                    }
                 }
             }
-            incoming = socket.recv() => {
-                match incoming {
-                    Some(Ok(Message::Close(_))) | None => break,
-                    Some(Err(_)) => break,
-                    _ => {} // ignore anything the client sends; this is a read-only feed
-                }
+            Err(error) => {
+                tracing::error!(%error, "market price ingestion failed; retaining last verified prices");
             }
         }
+        tokio::time::sleep(Duration::from_secs(15)).await;
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    async fn test_state() -> (AppState, std::path::PathBuf) {
-        let db_path =
-            std::env::temp_dir().join(format!("zenith-prices-test-{}.db", uuid::Uuid::new_v4()));
-        let pool = crate::db::init_pool(&format!("sqlite://{}", db_path.display())).await;
-        (AppState::new(pool), db_path)
-    }
-
-    #[tokio::test]
-    async fn tick_once_moves_every_price_within_the_per_tick_bound() {
-        let (state, db_path) = test_state().await;
-        let before = state.spot_prices.lock().unwrap().clone();
-
-        tick_once(&state);
-
-        let after = state.spot_prices.lock().unwrap().clone();
-        for (underlying, before_price) in &before {
-            let after_price = after[underlying];
-            let max_move = before_price * MAX_PCT_MOVE_PER_TICK;
-            assert!(
-                (after_price - before_price).abs() <= max_move + 1e-9,
-                "{underlying} moved from {before_price} to {after_price}, beyond the {MAX_PCT_MOVE_PER_TICK} bound"
-            );
-        }
-
-        state.db.close().await;
-        let _ = std::fs::remove_file(&db_path);
-    }
-
-    #[tokio::test]
-    async fn tick_once_never_lets_a_price_reach_zero_or_go_negative() {
-        let (state, db_path) = test_state().await;
-        state
-            .spot_prices
-            .lock()
-            .unwrap()
-            .insert("TINY".into(), 0.0001);
-
-        // Enough ticks that a run of unlucky downward moves would drive an
-        // unclamped price to zero or below if the floor weren't enforced.
-        for _ in 0..1000 {
-            tick_once(&state);
-        }
-
-        let price = state.spot_prices.lock().unwrap()["TINY"];
-        assert!(price > 0.0, "price floor was violated: {price}");
-
-        state.db.close().await;
-        let _ = std::fs::remove_file(&db_path);
-    }
-
-    #[tokio::test]
-    async fn tick_once_broadcasts_the_post_tick_snapshot() {
-        let (state, db_path) = test_state().await;
-        let mut rx = state.spot_tx.subscribe();
-
-        let returned = tick_once(&state);
-        let broadcast = rx.try_recv().unwrap();
-        assert_eq!(returned, broadcast);
-
-        // Compared with a tolerance rather than exact JSON equality: the
-        // broadcast payload went through a text round-trip (serialize to
-        // string, parse back), and serde_json's default float parser
-        // isn't guaranteed bit-exact on that round-trip the way its ryu
-        // serializer is — an unrelated JSON-text subtlety, not a bug in
-        // tick_once itself.
-        let payload: serde_json::Value = serde_json::from_str(&broadcast).unwrap();
-        let live_prices = state.spot_prices.lock().unwrap().clone();
-        for (underlying, live_price) in &live_prices {
-            let broadcast_price = payload["prices"][underlying].as_f64().unwrap();
-            assert!(
-                (broadcast_price - live_price).abs() < 1e-9,
-                "{underlying}: broadcast {broadcast_price} vs live {live_price}"
-            );
-        }
-
-        state.db.close().await;
-        let _ = std::fs::remove_file(&db_path);
-    }
-}

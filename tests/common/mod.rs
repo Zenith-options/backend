@@ -24,9 +24,8 @@ pub struct TestApp {
     router: axum::Router,
     db_path: std::path::PathBuf,
     /// A clone of the AppState the router was built over. The `Arc<Mutex<_>>`
-    /// maps inside are shared with the router, so a test can nudge spot
-    /// prices/vols directly (deterministic inputs) without going through the
-    /// WebSocket feed or the background simulator, which TestApp never spawns.
+    /// maps inside are shared with the router, so tests can set deterministic
+    /// spot prices/vols without starting the background ingestion loop.
     pub state: zenith_backend::AppState,
 }
 
@@ -51,7 +50,7 @@ impl TestApp {
 
     /// Overwrites the spot price (and optionally the base vol) for one
     /// underlying on the shared AppState — lets a test pin deterministic
-    /// inputs instead of living with the seeded constants.
+    /// inputs without a live feed.
     pub fn set_spot(&self, underlying: &str, spot: f64) {
         self.state
             .spot_prices

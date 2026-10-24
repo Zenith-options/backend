@@ -34,6 +34,10 @@ pub enum ApiErrorCode {
     StorageArchived,
     /// Authentication requirements were not satisfied.
     AuthFailure,
+    /// A Soroban JSON-RPC request used an unsupported method.
+    RpcMethodUnsupported,
+    /// A Soroban RPC endpoint or transport failed.
+    RpcUnavailable,
     /// The action or XDR could not be parsed.
     InvalidRequest,
     /// An error that could not be mapped to a more specific code.
@@ -45,6 +49,8 @@ pub enum ApiErrorCode {
 pub struct DecodedError {
     /// Stable API error code.
     pub code: ApiErrorCode,
+    /// HTTP status appropriate for an API response carrying this failure.
+    pub http_status: u16,
     /// Human-readable message describing the failure.
     pub message: String,
     /// Actionable remediation hint for the integrator.
@@ -52,6 +58,9 @@ pub struct DecodedError {
     /// The raw on-chain error code, when one was available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_code: Option<u32>,
+    /// Raw JSON-RPC error code, when the failure came from a JSON-RPC reply.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_rpc_code: Option<i64>,
 }
 
 impl DecodedError {
@@ -64,11 +73,59 @@ impl DecodedError {
     ) -> Self {
         Self {
             code,
+            http_status: match code {
+                ApiErrorCode::InvalidRequest => 400,
+                ApiErrorCode::Unauthorized | ApiErrorCode::AuthFailure => 403,
+                ApiErrorCode::SeriesNotFound => 404,
+                ApiErrorCode::SeriesExpired => 409,
+                ApiErrorCode::RpcMethodUnsupported | ApiErrorCode::RpcUnavailable => 503,
+                ApiErrorCode::Unknown => 500,
+                _ => 422,
+            },
             message: message.to_string(),
             remediation: remediation.to_string(),
             raw_code,
+            raw_rpc_code: None,
         }
     }
+}
+
+/// Translate a JSON-RPC 2.0 error code into a stable API error. The upstream
+/// message is retained as context, but clients should branch on `code`.
+pub fn map_rpc_error_code(raw_code: i64, raw_message: &str) -> DecodedError {
+    let (api_code, message, remediation) = match raw_code {
+        -32700 | -32600 | -32602 => (
+            ApiErrorCode::InvalidRequest,
+            "The Soroban RPC request was invalid",
+            "Check the request method and parameters before retrying.",
+        ),
+        -32601 => (
+            ApiErrorCode::RpcMethodUnsupported,
+            "The Soroban RPC endpoint does not support this method",
+            "Use an endpoint that supports the requested Soroban RPC method.",
+        ),
+        -32603 => (
+            ApiErrorCode::RpcUnavailable,
+            "The Soroban RPC endpoint could not complete the request",
+            "Retry against a healthy endpoint; contact the operator if this persists.",
+        ),
+        _ => (
+            ApiErrorCode::Unknown,
+            "The Soroban RPC request failed",
+            "Inspect the raw RPC code and message, then consult the endpoint documentation.",
+        ),
+    };
+    let mut decoded = DecodedError::new(
+        api_code,
+        message,
+        remediation,
+        None,
+    );
+    decoded.raw_rpc_code = Some(raw_code);
+    if !raw_message.is_empty() {
+        decoded.message = format!("{message}: {raw_message}");
+    }
+    decoded
 }
 
 /// A single entry in the Zenith `#[contracterror]` mapping table.
@@ -176,36 +233,16 @@ pub fn map_host_error(class: HostErrorClass) -> DecodedError {
     }
 }
 
-/// Decode a raw Soroban host error code into a [`DecodedError`].
-///
-/// Host error codes are grouped by class; unrecognised codes fall back to
-/// [`ApiErrorCode::Unknown`] with the raw code preserved for diagnostics.
+/// Map a host error's numeric payload when its XDR error class was not
+/// available. The integer alone is not enough to safely infer a Soroban host
+/// error category, so it is preserved as unknown instead of guessed.
 pub fn map_host_error_code(raw_code: u32) -> DecodedError {
-    // Host error discriminants are grouped by class in the Soroban host error
-    // enum. The ranges below cover the classes relevant to the preflight.
-    let class = match raw_code {
-        // Budget / resource exhaustion.
-        0x0000_0001..=0x0000_000F => Some(HostErrorClass::BudgetExceeded),
-        // Storage / archival errors.
-        0x0000_0010..=0x0000_001F => Some(HostErrorClass::StorageArchived),
-        // Authentication errors.
-        0x0000_0020..=0x0000_002F => Some(HostErrorClass::AuthFailure),
-        _ => None,
-    };
-
-    match class {
-        Some(class) => {
-            let mut decoded = map_host_error(class);
-            decoded.raw_code = Some(raw_code);
-            decoded
-        }
-        None => DecodedError::new(
-            ApiErrorCode::Unknown,
-            "Unrecognized host error",
-            "Inspect the raw host error code and consult the Soroban host error reference.",
-            Some(raw_code),
-        ),
-    }
+    DecodedError::new(
+        ApiErrorCode::Unknown,
+        "Unclassified Soroban host error",
+        "Inspect the host error class and numeric code in the Soroban XDR response.",
+        Some(raw_code),
+    )
 }
 
 #[cfg(test)]
@@ -228,17 +265,17 @@ mod tests {
     }
 
     #[test]
-    fn maps_host_error_classes() {
+    fn maps_typed_host_error_classes() {
         assert_eq!(
-            map_host_error_code(0x0000_0001).code,
+            map_host_error(HostErrorClass::BudgetExceeded).code,
             ApiErrorCode::BudgetExceeded
         );
         assert_eq!(
-            map_host_error_code(0x0000_0010).code,
+            map_host_error(HostErrorClass::StorageArchived).code,
             ApiErrorCode::StorageArchived
         );
         assert_eq!(
-            map_host_error_code(0x0000_0020).code,
+            map_host_error(HostErrorClass::AuthFailure).code,
             ApiErrorCode::AuthFailure
         );
     }
@@ -248,5 +285,16 @@ mod tests {
         let decoded = map_host_error_code(0xDEAD_BEEF);
         assert_eq!(decoded.code, ApiErrorCode::Unknown);
         assert_eq!(decoded.raw_code, Some(0xDEAD_BEEF));
+    }
+
+    #[test]
+    fn maps_json_rpc_errors_to_stable_codes() {
+        let invalid = map_rpc_error_code(-32602, "missing accountId");
+        assert_eq!(invalid.code, ApiErrorCode::InvalidRequest);
+        assert_eq!(invalid.raw_rpc_code, Some(-32602));
+        assert!(invalid.message.contains("missing accountId"));
+
+        let unsupported = map_rpc_error_code(-32601, "getLedgerEntries");
+        assert_eq!(unsupported.code, ApiErrorCode::RpcMethodUnsupported);
     }
 }
