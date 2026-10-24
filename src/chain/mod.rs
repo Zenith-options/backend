@@ -31,6 +31,7 @@ pub mod authorization;
 pub mod bindings;
 pub mod errors;
 pub mod horizon;
+pub mod projections;
 pub mod readiness;
 pub mod relayer;
 pub mod rpc;
