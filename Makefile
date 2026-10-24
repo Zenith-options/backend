@@ -9,7 +9,16 @@
 # (default ./exports).
 EXPORT_DIR ?= exports
 
-.PHONY: duckdb-demo
+.PHONY: duckdb-demo chain-local-up chain-local-down chain-local-deploy
+
+chain-local-up:
+	docker compose -f deploy/soroban-local.yml up -d --wait
+
+chain-local-down:
+	docker compose -f deploy/soroban-local.yml down -v
+
+chain-local-deploy:
+	bash scripts/deploy-soroban.sh local deploy/local-contracts.json
 
 ## Query the analytics exports with DuckDB: row counts per dataset, a
 ## per-underlying settlement summary, and the top wallets by realized P&L
