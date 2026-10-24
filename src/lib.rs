@@ -49,6 +49,7 @@ pub mod security_policy;
 pub mod settlement_price;
 pub mod settlement_saga;
 pub mod signing;
+pub mod soroban;
 pub mod strategies;
 pub mod treasury;
 pub mod strkey;
@@ -801,6 +802,11 @@ pub fn build_router(state: AppState) -> Router {
             post(chain::settlement::claim),
         )
         .route("/api/v1/tx/:handle", get(chain::handlers::get_preparation))
+        // Failed-settlement diagnostics for operators (Bearer ZENITH_ADMIN_TOKEN).
+        .nest_service(
+            "/api/v1/admin/tx-forensics",
+            soroban::forensics::router(state.db.clone(), std::env::var("ZENITH_ADMIN_TOKEN").ok()),
+        )
         .layer(PropagateRequestIdLayer::new(request_id_header()))
         .layer(TraceLayer::new_for_http())
         .layer(SetRequestIdLayer::new(
