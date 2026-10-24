@@ -25,15 +25,19 @@ pub mod math_fixed;
 pub mod models;
 pub mod payoff;
 pub mod positions;
+pub mod protocol_params;
 pub mod prices;
 pub mod rate_limit_key;
+pub mod rewards;
 pub mod request_id;
 pub mod secrets;
 pub mod security_policy;
 pub mod signing;
 pub mod strategies;
+pub mod treasury;
 pub mod strkey;
 pub mod watchlist;
+pub mod voting_power;
 
 // Kani proof harnesses for the fixed-point arithmetic in `math_fixed`
 // (issue #119). Only compiled under `cargo kani`, so normal builds and
