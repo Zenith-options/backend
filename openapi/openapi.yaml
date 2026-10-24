@@ -39,6 +39,68 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/VersionUsage"
+  /api/v1/keeper/bounties:
+    get:
+      operationId: getKeeperBountyAccounting
+      tags: [Trading]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Current keeper bounty balance and completed job accruals.
+  /api/v1/privacy/export:
+    get:
+      operationId: exportWalletSettlementData
+      tags: [Trading]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Account, positions, and settlement activity for the authenticated wallet.
+  /api/v1/privacy/erasure:
+    delete:
+      operationId: eraseWalletOffChainData
+      tags: [Trading]
+      security:
+        - bearerAuth: []
+      responses:
+        "202":
+          description: Off-chain operational data erased; financial records and pseudonymous anchors retained.
+        "409":
+          description: Erasure blocked while an open position exists.
+  /api/v1/settlement/statements:
+    get:
+      operationId: getSettlementStatement
+      tags: [Trading]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - name: to
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [csv, pdf]
+        - name: record_id
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Deterministic CSV/PDF statement or single-record confirmation.
+        "413":
+          description: Requested statement exceeds the record cap.
   /api/v1/spot:
     get:
       operationId: getSpotV1

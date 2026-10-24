@@ -19,6 +19,7 @@ pub mod margin;
 pub mod pagination;
 pub mod alerts;
 pub mod abuse;
+pub mod api_version;
 pub mod audit;
 pub mod auth;
 pub mod chain_cost;
@@ -28,6 +29,7 @@ pub mod error;
 pub mod history;
 pub mod governance;
 pub mod indexer;
+pub mod keeper;
 pub mod math_fixed;
 pub mod margin_fixed;
 pub mod models;
@@ -35,8 +37,10 @@ pub mod outbox;
 pub mod pagination;
 pub mod payoff;
 pub mod preview;
+pub mod privacy;
 pub mod series_lifecycle;
 pub mod settlement_policy;
+pub mod settlement_reports;
 pub mod positions;
 pub mod protocol_params;
 pub mod public_api;
@@ -752,6 +756,8 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/expiries/:underlying", get(get_expiry_calendar))
         .route("/api/v1/stats", get(get_protocol_stats))
+        .route("/api/v2/spot", get(api_version::get_spot_v2))
+        .route("/api/versions/usage", get(api_version::usage))
         .merge(auth_rate_limited_routes())
         .merge(mutation_rate_limited_routes())
         .route("/api/v1/auth/me", get(auth::get_me))
@@ -807,8 +813,20 @@ pub fn build_router(state: AppState) -> Router {
         .nest_service(
             "/api/v1/admin/tx-forensics",
             soroban::forensics::router(state.db.clone(), std::env::var("ZENITH_ADMIN_TOKEN").ok()),
+        .route("/api/v1/keeper/bounties", get(keeper::bounty::accounting))
+        .route("/api/v1/privacy/export", get(privacy::export))
+        .route(
+            "/api/v1/privacy/erasure",
+            axum::routing::delete(privacy::erase),
+        )
+        .route(
+            "/api/v1/settlement/statements",
+            get(settlement_reports::statement),
         )
         .layer(PropagateRequestIdLayer::new(request_id_header()))
+        .layer(axum::middleware::from_fn(
+            api_version::negotiate_version,
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(SetRequestIdLayer::new(
             request_id_header(),
