@@ -47,10 +47,12 @@ pub mod positions;
 pub mod protocol_params;
 pub mod public_api;
 pub mod prices;
+pub mod quotes;
 pub mod rate_limit_key;
 pub mod rewards;
 pub mod request_id;
 pub mod risk_stress;
+pub mod rfq;
 pub mod secrets;
 pub mod security_policy;
 pub mod settlement_notifications;
@@ -713,6 +715,10 @@ fn mutation_rate_limited_routes() -> Router<AppState> {
         )
         .route("/api/v1/tx/prepare", post(chain::handlers::post_prepare))
         .route("/api/v1/tx/submit", post(chain::handlers::post_submit))
+        .route("/api/v1/rfqs", post(rfq::create_rfq))
+        .route("/api/v1/rfqs/:id/quotes", post(rfq::submit_quote))
+        .route("/api/v1/rfqs/:id/accept", post(rfq::accept_quote))
+        .route("/api/v1/rfqs/:id/cancel", post(rfq::cancel_rfq))
         .layer(GovernorLayer { config })
 }
 
@@ -768,6 +774,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/versions/usage", get(api_version::usage))
         .merge(auth_rate_limited_routes())
         .merge(mutation_rate_limited_routes())
+        .route("/api/v1/rfqs/:id", get(rfq::get_rfq))
         .route("/api/v1/auth/me", get(auth::get_me))
         .route("/api/v1/account", get(positions::get_account))
         .route("/api/v1/positions", get(positions::list_positions))
