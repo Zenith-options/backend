@@ -103,7 +103,12 @@ impl Modify for SecurityAddon {
         crate::payoff::PayoffRequest,
         crate::payoff::PayoffResponse,
         crate::payoff::PricedLeg,
-        crate::payoff::PayoffPoint
+        crate::payoff::PayoffPoint,
+        crate::chain::prepared_tx::OperationKind,
+        crate::chain::prepared_tx::PrepareRequest,
+        crate::chain::prepared_tx::PrepareResponse,
+        crate::chain::prepared_tx::SubmitRequest,
+        crate::chain::prepared_tx::SubmitResponse,
     )),
     modifiers(&SecurityAddon)
 )]

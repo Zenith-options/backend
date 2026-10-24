@@ -683,6 +683,8 @@ fn mutation_rate_limited_routes() -> Router<AppState> {
             "/api/v1/strategies/:id/close",
             post(strategies::close_strategy),
         )
+        .route("/api/v1/tx/prepare", post(chain::handlers::post_prepare))
+        .route("/api/v1/tx/submit", post(chain::handlers::post_submit))
         .layer(GovernorLayer { config })
 }
 
@@ -783,6 +785,7 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/settlement/batches/:id/claims",
             post(chain::settlement::claim),
         )
+        .route("/api/v1/tx/:handle", get(chain::handlers::get_preparation))
         .layer(PropagateRequestIdLayer::new(request_id_header()))
         .layer(TraceLayer::new_for_http())
         .layer(SetRequestIdLayer::new(
