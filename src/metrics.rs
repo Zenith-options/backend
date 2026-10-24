@@ -35,6 +35,13 @@ pub struct Metrics {
     websocket_connections: AtomicU64,
     db_query_count: AtomicU64,
     db_query_duration_seconds: Mutex<f64>,
+    channel_pool_size: AtomicU64,
+    channel_pool_leased: AtomicU64,
+    channel_pool_quarantined: AtomicU64,
+    channel_lease_waits: AtomicU64,
+    channel_lease_wait_duration_seconds: Mutex<f64>,
+    channel_sequence_gap_recoveries: AtomicU64,
+    channel_sequence_reservations: AtomicU64,
 }
 
 static GLOBAL_METRICS: OnceLock<Arc<Metrics>> = OnceLock::new();
@@ -109,6 +116,34 @@ impl Metrics {
 
     pub fn record_alert_triggers(&self, count: u64) {
         self.alert_triggers.fetch_add(count, Ordering::Relaxed);
+    }
+
+    pub fn set_channel_pool_size(&self, size: u64) {
+        self.channel_pool_size.store(size, Ordering::Relaxed);
+    }
+
+    pub fn set_channel_pool_leased(&self, leased: u64) {
+        self.channel_pool_leased.store(leased, Ordering::Relaxed);
+    }
+
+    pub fn set_channel_pool_quarantined(&self, quarantined: u64) {
+        self.channel_pool_quarantined
+            .store(quarantined, Ordering::Relaxed);
+    }
+
+    pub fn record_channel_lease_wait(&self, duration: Duration) {
+        self.channel_lease_waits.fetch_add(1, Ordering::Relaxed);
+        *self.channel_lease_wait_duration_seconds.lock().unwrap() += duration.as_secs_f64();
+    }
+
+    pub fn record_channel_sequence_gap_recovery(&self) {
+        self.channel_sequence_gap_recoveries
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_channel_sequence_reservations(&self, count: u64) {
+        self.channel_sequence_reservations
+            .fetch_add(count, Ordering::Relaxed);
     }
 
     pub fn websocket_connected(self: &Arc<Self>) -> WebSocketConnection {
@@ -248,6 +283,62 @@ impl Metrics {
         output.push_str(&format!(
             "zenith_rate_limit_rejections_total {}\n",
             self.rate_limit_rejections.load(Ordering::Relaxed)
+        ));
+        output.push_str(
+            "# HELP zenith_channel_pool_size Configured channel account pool size.\n\
+             # TYPE zenith_channel_pool_size gauge\n",
+        );
+        output.push_str(&format!(
+            "zenith_channel_pool_size {}\n",
+            self.channel_pool_size.load(Ordering::Relaxed)
+        ));
+        output.push_str(
+            "# HELP zenith_channel_pool_leased Channel accounts currently leased.\n\
+             # TYPE zenith_channel_pool_leased gauge\n",
+        );
+        output.push_str(&format!(
+            "zenith_channel_pool_leased {}\n",
+            self.channel_pool_leased.load(Ordering::Relaxed)
+        ));
+        output.push_str(
+            "# HELP zenith_channel_pool_quarantined Channel accounts quarantined as unhealthy.\n\
+             # TYPE zenith_channel_pool_quarantined gauge\n",
+        );
+        output.push_str(&format!(
+            "zenith_channel_pool_quarantined {}\n",
+            self.channel_pool_quarantined.load(Ordering::Relaxed)
+        ));
+        output.push_str(
+            "# HELP zenith_channel_lease_waits_total Total channel lease acquisition waits.\n\
+             # TYPE zenith_channel_lease_waits_total counter\n",
+        );
+        output.push_str(&format!(
+            "zenith_channel_lease_waits_total {}\n",
+            self.channel_lease_waits.load(Ordering::Relaxed)
+        ));
+        output.push_str(
+            "# HELP zenith_channel_lease_wait_duration_seconds_sum Total time spent waiting for a channel lease.\n\
+             # TYPE zenith_channel_lease_wait_duration_seconds_sum counter\n",
+        );
+        output.push_str(&format!(
+            "zenith_channel_lease_wait_duration_seconds_sum {}\n",
+            *self.channel_lease_wait_duration_seconds.lock().unwrap()
+        ));
+        output.push_str(
+            "# HELP zenith_channel_sequence_gap_recoveries_total Sequence gaps recovered via on-chain reconciliation.\n\
+             # TYPE zenith_channel_sequence_gap_recoveries_total counter\n",
+        );
+        output.push_str(&format!(
+            "zenith_channel_sequence_gap_recoveries_total {}\n",
+            self.channel_sequence_gap_recoveries.load(Ordering::Relaxed)
+        ));
+        output.push_str(
+            "# HELP zenith_channel_sequence_reservations_total Sequence numbers reserved in batches.\n\
+             # TYPE zenith_channel_sequence_reservations_total counter\n",
+        );
+        output.push_str(&format!(
+            "zenith_channel_sequence_reservations_total {}\n",
+            self.channel_sequence_reservations.load(Ordering::Relaxed)
         ));
         output
     }

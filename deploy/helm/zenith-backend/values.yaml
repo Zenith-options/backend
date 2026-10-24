@@ -37,6 +37,17 @@ database:
 redis:
   urlKey: REDIS_URL
 
+channelPool:
+  enabled: true
+  size: 8
+  leaseTTL: 30s
+  reservationBatchSize: 5
+  healthCheckInterval: 60s
+  minimumXLMBalance: "2"
+  networkPassphraseKey: STALLAR_NETWORK
+  secretProviderKey: CHANNEL_ACCOUNTS_SECRETS
+  reconcilerInterval: 15s
+
 autoscaling:
   enabled: true
   minReplicas: 2
