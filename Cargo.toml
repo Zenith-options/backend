@@ -12,6 +12,11 @@ name = "zenith-backend"
 version = "0.1.0"
 edition = "2021"
 
+# Only the targets declared below are built. `src/bin/` also holds tool
+# scripts from earlier iterations that were never wired into this package's
+# dependency set; automatic discovery would try to build them all.
+autobins = false
+
 [[bin]]
 name = "zenith-backend"
 path = "src/main.rs"

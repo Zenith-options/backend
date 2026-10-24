@@ -1,4 +1,7 @@
 pub mod accounts;
+pub mod contracts;
+pub mod event_indexer;
+pub mod xdr;
 pub mod bindings;
 pub mod horizon;
 pub mod readiness;
