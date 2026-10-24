@@ -38,6 +38,7 @@ pub mod governance;
 pub mod indexer;
 pub mod keeper;
 pub mod insurance;
+pub mod market_maker;
 pub mod math_fixed;
 pub mod margin_fixed;
 pub mod models;
@@ -766,6 +767,16 @@ fn request_id_header() -> axum::http::HeaderName {
 }
 
 pub fn build_router(state: AppState) -> Router {
+    let market_maker_state = market_maker::GatewayState::new(state.db.clone());
+    build_router_with_market_maker(state, market_maker_state)
+}
+
+/// Builds the public API with an explicitly configured market-maker settlement
+/// adapter. `build_router` keeps order entry disabled unless this is supplied.
+pub fn build_router_with_market_maker(
+    state: AppState,
+    market_maker_state: market_maker::GatewayState,
+) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
@@ -869,6 +880,7 @@ pub fn build_router(state: AppState) -> Router {
         .nest_service(
             "/api/v1/admin/tx-forensics",
             soroban::forensics::router(state.db.clone(), std::env::var("ZENITH_ADMIN_TOKEN").ok()),
+        )
         .route("/api/v1/keeper/bounties", get(keeper::bounty::accounting))
         .route("/api/v1/privacy/export", get(privacy::export))
         .route(
@@ -879,6 +891,8 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/settlement/statements",
             get(settlement_reports::statement),
         )
+        .with_state(state)
+        .merge(market_maker::routes(market_maker_state))
         .layer(PropagateRequestIdLayer::new(request_id_header()))
         .layer(axum::middleware::from_fn(
             api_version::negotiate_version,
@@ -889,7 +903,6 @@ pub fn build_router(state: AppState) -> Router {
             request_id::MakeRequestUuid,
         ))
         .layer(cors)
-        .with_state(state)
 }
 
 /// Waits for Ctrl+C or SIGTERM so axum stops accepting new connections
