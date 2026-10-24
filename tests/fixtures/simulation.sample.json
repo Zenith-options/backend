@@ -1,0 +1,27 @@
+{
+  "_comment": "Recorded `simulateTransaction` response of a collateral deposit. The `resources` block is the decoded footprint the node reported for the transaction.",
+  "transactionData": "AAAAABmB7mV0eXB0dXJTaW1hdGVkVHJhbnNhY3Rpb25DaHJvbXBsZQUAAAA=",
+  "minResourceFee": "125000",
+  "latestLedger": 4821337,
+  "results": [
+    {
+      "auth": [],
+      "xdr": "AAAAABmB7mV0eXB0dXJTaW1hdGVkVHJhbnNhY3Rpb25DaHJvbXBsZQUAAAA="
+    }
+  ],
+  "resources": {
+    "instructions": 148392,
+    "readBytes": 5120,
+    "writeBytes": 1024,
+    "events": 2,
+    "footprint": {
+      "read": [
+        { "xdr": "AAAAAQAAAAIAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" },
+        { "xdr": "AAAAAgAAAAIAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" }
+      ],
+      "write": [
+        { "xdr": "AAAAAwAAAAIAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" }
+      ]
+    }
+  }
+}

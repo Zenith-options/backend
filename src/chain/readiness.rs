@@ -42,7 +42,9 @@ pub async fn check_wallet_readiness(
             checks.push(ReadinessItem {
                 name: "account_exists".into(),
                 status: false,
-                remediation: format!("Create and fund account {wallet} on Stellar with at least 1.5 XLM."),
+                remediation: format!(
+                    "Create and fund account {wallet} on Stellar with at least 1.5 XLM."
+                ),
                 details: None,
             });
             None
@@ -91,7 +93,11 @@ pub async fn check_wallet_readiness(
 
         match usdc_line {
             Some(line) => {
-                let limit: f64 = line.limit.as_ref().and_then(|l| l.parse().ok()).unwrap_or(f64::MAX);
+                let limit: f64 = line
+                    .limit
+                    .as_ref()
+                    .and_then(|l| l.parse().ok())
+                    .unwrap_or(f64::MAX);
                 let usdc_balance: f64 = line.balance.parse().unwrap_or(0.0);
 
                 checks.push(ReadinessItem {
@@ -112,22 +118,32 @@ pub async fn check_wallet_readiness(
                     remediation: if balance_ok {
                         "".into()
                     } else {
-                        format!("Deposit at least {:.2} additional USDC (current balance: {:.2} USDC).", required_usdc - usdc_balance, usdc_balance)
+                        format!(
+                            "Deposit at least {:.2} additional USDC (current balance: {:.2} USDC).",
+                            required_usdc - usdc_balance,
+                            usdc_balance
+                        )
                     },
-                    details: Some(serde_json::json!({ "required": required_usdc, "current": usdc_balance })),
+                    details: Some(
+                        serde_json::json!({ "required": required_usdc, "current": usdc_balance }),
+                    ),
                 });
             }
             None => {
                 checks.push(ReadinessItem {
                     name: "trustline_usdc".into(),
                     status: false,
-                    remediation: format!("Establish a USDC trustline for asset code USDC issued by {usdc_issuer}."),
+                    remediation: format!(
+                        "Establish a USDC trustline for asset code USDC issued by {usdc_issuer}."
+                    ),
                     details: None,
                 });
                 checks.push(ReadinessItem {
                     name: "balance_sufficient_for_action".into(),
                     status: false,
-                    remediation: format!("Deposit at least {required_usdc} USDC after establishing trustline."),
+                    remediation: format!(
+                        "Deposit at least {required_usdc} USDC after establishing trustline."
+                    ),
                     details: None,
                 });
             }
@@ -168,15 +184,28 @@ pub struct ReadinessQuery {
     pub required_xlm: Option<f64>,
 }
 
+/// The dependencies of the readiness handler.
+///
+/// The chain configuration is injected instead of being read from the global
+/// application state, so the handler stays usable from the admin tooling and
+/// from the tests.
+#[derive(Clone, Debug)]
+pub struct ReadinessDeps {
+    /// The Horizon endpoint to query.
+    pub horizon_url: String,
+    /// The issuer of the USDC trustline that has to exist.
+    pub usdc_issuer: String,
+}
+
 pub async fn get_readiness_handler(
-    axum::extract::State(state): axum::extract::State<crate::AppState>,
-    crate::error::AppQuery(q): crate::error::AppQuery<ReadinessQuery>,
+    axum::extract::State(deps): axum::extract::State<ReadinessDeps>,
+    axum::extract::Query(q): axum::extract::Query<ReadinessQuery>,
 ) -> axum::response::Json<ReadinessReport> {
-    let horizon = HorizonClient::new(state.network.horizon_url.clone());
+    let horizon = HorizonClient::new(deps.horizon_url.clone());
     let report = check_wallet_readiness(
         &horizon,
         &q.wallet_address,
-        &state.network.asset_issuers.usdc_issuer,
+        &deps.usdc_issuer,
         q.required_usdc.unwrap_or(0.0),
         q.required_xlm.unwrap_or(0.0),
     )

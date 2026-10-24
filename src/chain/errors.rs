@@ -55,7 +55,13 @@ pub struct DecodedError {
 }
 
 impl DecodedError {
-    fn new(code: ApiErrorCode, message: &str, remediation: &str, raw_code: Option<u32>) -> Self {
+    /// Build a decoded error.
+    pub fn new(
+        code: ApiErrorCode,
+        message: &str,
+        remediation: &str,
+        raw_code: Option<u32>,
+    ) -> Self {
         Self {
             code,
             message: message.to_string(),

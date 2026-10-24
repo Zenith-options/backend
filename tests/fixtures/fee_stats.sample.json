@@ -1,0 +1,14 @@
+{
+  "_comment": "Recorded `getFeeStats` response. The percentiles are the inclusion fees, in stroops, that the node saw over the last 1000 ledgers.",
+  "latestLedger": 4821337,
+  "oldestLedger": 4820337,
+  "maxFee": 250000,
+  "minFee": 100,
+  "p50": 200,
+  "p75": 1000,
+  "p90": 5000,
+  "p95": 12000,
+  "p99": 100000,
+  "transactionCount": 2048,
+  "ledgerCount": 1000
+}

@@ -75,6 +75,22 @@ integer-scaled prototypes in `math_fixed.rs` — see `docs/verification.md`
 for the property list, the `cargo kani` command, and the documented `f64`
 gap. `.github/workflows/kani.yml` runs it on every PR and nightly.
 
+The Soroban integration lives in `src/chain/`. A transaction is simulated
+first — the ledger footprint and the declared resources come from the
+simulation, never from a constant — and the resource fee is computed from
+those resources. The inclusion fee is bid dynamically: the strategy takes a
+percentile of the fees the network recently accepted, clamped between a floor
+and a ceiling, bounded by a per-transaction cap and a rolling 24 hour budget.
+What was paid, and why, is persisted with the transaction. See
+`docs/chain-fees.md`.
+
+The event indexer records the ledger ranges it has covered, so a hole left by
+a restart or an RPC outage is *detectable* instead of silently corrupting the
+off-chain state. The gaps are repaired by a historical backfill that replays
+through the same projection step as the live indexer, and reports the ranges
+the node's retention window makes unrecoverable. See
+`docs/indexer-backfill.md`.
+
 
 ## Endpoints
 
