@@ -1,5 +1,6 @@
 pub mod decoder;
 
 pub use decoder::{
-    DecodeError, DecoderKey, DecoderRegistry, EventDecoder, FallbackStrategy, RawContractEvent,
+    validate_decoded_event, DecodeError, DecodeOutcome, DecoderKey, DecoderRegistry,
+    EventDecoder, FallbackStrategy, QuarantinedEvent, RawContractEvent,
 };

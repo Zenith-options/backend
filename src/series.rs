@@ -59,7 +59,9 @@ impl FromStr for OptionType {
 #[serde(rename_all = "lowercase")]
 pub enum SeriesStatus {
     Active,
+    Halted,
     Delisted,
+    Settled,
     Expired,
 }
 
@@ -67,7 +69,9 @@ impl SeriesStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             SeriesStatus::Active => "active",
+            SeriesStatus::Halted => "halted",
             SeriesStatus::Delisted => "delisted",
+            SeriesStatus::Settled => "settled",
             SeriesStatus::Expired => "expired",
         }
     }
@@ -79,7 +83,9 @@ impl FromStr for SeriesStatus {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_ascii_lowercase().as_str() {
             "active" => Ok(SeriesStatus::Active),
+            "halted" => Ok(SeriesStatus::Halted),
             "delisted" => Ok(SeriesStatus::Delisted),
+            "settled" => Ok(SeriesStatus::Settled),
             "expired" => Ok(SeriesStatus::Expired),
             other => Err(SeriesError::InvalidStatus(other.to_string())),
         }
@@ -116,6 +122,7 @@ pub enum SeriesError {
     UnknownUnderlying(String),
     NotFound(i64),
     NotOpenable { id: i64, status: SeriesStatus },
+    InvalidSettlementPrice,
     Db(rusqlite::Error),
 }
 
@@ -134,6 +141,9 @@ impl fmt::Display for SeriesError {
                 "series {id} is {} and cannot be opened",
                 status.as_str()
             ),
+            SeriesError::InvalidSettlementPrice => {
+                write!(f, "settlement price must be finite and non-negative")
+            }
             SeriesError::Db(e) => write!(f, "database error: {e}"),
         }
     }
@@ -361,18 +371,20 @@ pub fn generate_series(
     let cfg = underlying_config(underlying)?;
     let strikes = generate_strikes(spot, &cfg);
     let mut inserted = 0usize;
-    for (_, expiry) in expiries {
+    for (bucket, expiry) in expiries {
         for strike in &strikes {
             for option_type in [OptionType::Call, OptionType::Put] {
                 let id = instrument_id(underlying, expiry, *strike, option_type);
                 let changed = conn.execute(
                     "INSERT OR IGNORE INTO option_series \
-                     (underlying, strike, expiry, option_type, status, instrument_id) \
-                     VALUES (?1, ?2, ?3, ?4, 'active', ?5)",
+                     (underlying, strike, strike_scaled, strike_scale, expiry, expiry_kind,
+                      option_type, status, instrument_id) \
+                     VALUES (?1, ?2, ?2, 0, ?3, ?4, ?5, 'active', ?6)",
                     params![
                         underlying.to_ascii_uppercase(),
                         strike,
                         expiry,
+                        bucket.as_str(),
                         option_type.as_str(),
                         id
                     ],
@@ -449,8 +461,9 @@ pub fn resolve_or_create_series(
     }
     conn.execute(
         "INSERT OR IGNORE INTO option_series \
-         (underlying, strike, expiry, option_type, status, instrument_id) \
-         VALUES (?1, ?2, ?3, ?4, 'active', ?5)",
+         (underlying, strike, strike_scaled, strike_scale, expiry, expiry_kind,
+          option_type, status, instrument_id) \
+         VALUES (?1, ?2, ?2, 0, ?3, 'daily', ?4, 'active', ?5)",
         params![
             underlying.to_ascii_uppercase(),
             strike,
@@ -502,11 +515,74 @@ pub fn list_series(
 /// by `resolve_openable_series`.
 pub fn delist_series(conn: &Connection, id: i64) -> Result<OptionSeries, SeriesError> {
     let changed = conn.execute(
-        "UPDATE option_series SET status = 'delisted' WHERE id = ?1",
+        "UPDATE option_series SET status = 'delisted',
+         delisted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?1 AND status IN ('active', 'halted')",
         params![id],
     )?;
     if changed == 0 {
         return Err(SeriesError::NotFound(id));
+    }
+    get_series(conn, id)?.ok_or(SeriesError::NotFound(id))
+}
+
+/// Halt writes and exercises for one series while preserving its open interest.
+pub fn halt_series(conn: &Connection, id: i64) -> Result<OptionSeries, SeriesError> {
+    let changed = conn.execute(
+        "UPDATE option_series SET status = 'halted'
+         WHERE id = ?1 AND status = 'active'",
+        params![id],
+    )?;
+    if changed == 0 {
+        let series = get_series(conn, id)?.ok_or(SeriesError::NotFound(id))?;
+        return Err(SeriesError::NotOpenable {
+            id,
+            status: series.status,
+        });
+    }
+    get_series(conn, id)?.ok_or(SeriesError::NotFound(id))
+}
+
+/// Resume a previously halted series. Delisted, settled, and expired series
+/// remain terminal and cannot be reopened.
+pub fn resume_series(conn: &Connection, id: i64) -> Result<OptionSeries, SeriesError> {
+    let changed = conn.execute(
+        "UPDATE option_series SET status = 'active'
+         WHERE id = ?1 AND status = 'halted'",
+        params![id],
+    )?;
+    if changed == 0 {
+        let series = get_series(conn, id)?.ok_or(SeriesError::NotFound(id))?;
+        return Err(SeriesError::NotOpenable {
+            id,
+            status: series.status,
+        });
+    }
+    get_series(conn, id)?.ok_or(SeriesError::NotFound(id))
+}
+
+/// Record a final price and make a series terminal for early settlement.
+pub fn settle_series_early(
+    conn: &Connection,
+    id: i64,
+    settlement_price: f64,
+) -> Result<OptionSeries, SeriesError> {
+    if !settlement_price.is_finite() || settlement_price < 0.0 {
+        return Err(SeriesError::InvalidSettlementPrice);
+    }
+    let changed = conn.execute(
+        "UPDATE option_series
+         SET status = 'settled', settlement_price = ?1,
+             settled_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?2 AND status IN ('active', 'halted')",
+        params![settlement_price, id],
+    )?;
+    if changed == 0 {
+        let series = get_series(conn, id)?.ok_or(SeriesError::NotFound(id))?;
+        return Err(SeriesError::NotOpenable {
+            id,
+            status: series.status,
+        });
     }
     get_series(conn, id)?.ok_or(SeriesError::NotFound(id))
 }
@@ -536,13 +612,19 @@ pub fn count_series(conn: &Connection, status: Option<SeriesStatus>) -> Result<i
 fn row_to_series(row: &rusqlite::Row<'_>) -> rusqlite::Result<OptionSeries> {
     let option_type: String = row.get(4)?;
     let status: String = row.get(5)?;
+    let option_type = option_type
+        .parse()
+        .map_err(|_| rusqlite::Error::InvalidColumnType(4, "option_type".into(), rusqlite::types::Type::Text))?;
+    let status = status
+        .parse()
+        .map_err(|_| rusqlite::Error::InvalidColumnType(5, "status".into(), rusqlite::types::Type::Text))?;
     Ok(OptionSeries {
         id: row.get(0)?,
         underlying: row.get(1)?,
         strike: row.get(2)?,
         expiry: row.get(3)?,
-        option_type: option_type.parse().unwrap_or(OptionType::Call),
-        status: status.parse().unwrap_or(SeriesStatus::Active),
+        option_type,
+        status,
         instrument_id: row.get(6)?,
     })
 }
