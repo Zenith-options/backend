@@ -12,6 +12,7 @@ pub mod orderbook;
 pub mod policy;
 pub mod reconciliation_policy;
 pub mod settlement_keeper;
+pub mod storage_ttl;
 pub mod transaction;
 pub mod transport;
 pub mod xdr;

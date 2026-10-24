@@ -36,6 +36,8 @@ pub mod rewards;
 pub mod request_id;
 pub mod secrets;
 pub mod security_policy;
+pub mod settlement_price;
+pub mod settlement_saga;
 pub mod signing;
 pub mod strategies;
 pub mod treasury;

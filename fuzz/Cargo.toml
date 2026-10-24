@@ -82,3 +82,15 @@ name = "cursor_query"
 path = "fuzz_targets/cursor_query.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "settlement_price"
+path = "fuzz_targets/settlement_price.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "settlement_saga"
+path = "fuzz_targets/settlement_saga.rs"
+test = false
+doc = false

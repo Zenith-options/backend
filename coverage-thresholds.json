@@ -14,5 +14,7 @@
   "src/request_id.rs": 75,
   "src/strategies.rs": 45,
   "src/strkey.rs": 65,
-  "src/watchlist.rs": 45
+  "src/watchlist.rs": 45,
+  "src/settlement_price.rs": 70,
+  "src/settlement_saga.rs": 70
 }
