@@ -36,6 +36,7 @@ pub mod pagination;
 pub mod payoff;
 pub mod preview;
 pub mod series_lifecycle;
+pub mod settlement_policy;
 pub mod positions;
 pub mod protocol_params;
 pub mod public_api;

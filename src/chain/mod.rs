@@ -1,5 +1,6 @@
 pub mod accounts;
 pub mod api_models;
+pub mod auth;
 pub mod backfill;
 pub mod batch;
 pub mod collateral_vault;
@@ -10,6 +11,7 @@ pub mod event_indexer;
 pub mod fees;
 pub mod handlers;
 pub mod indexer;
+pub mod limits;
 pub mod liquidation_policy;
 pub mod merkle;
 pub mod mode;

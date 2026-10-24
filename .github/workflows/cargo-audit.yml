@@ -27,8 +27,13 @@ jobs:
           cat cargo-audit.json >> "$GITHUB_STEP_SUMMARY"
           exit "$result"
       - name: File or update security issue
+<<<<<<< HEAD
         if: steps.audit.outputs.exit_code != '0'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+=======
+        if: steps.audit.outputs.exit_code == '1'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+>>>>>>> origin/pr/309
         with:
           script: |
             const fs = require("fs");
@@ -73,3 +78,8 @@ jobs:
               await github.rest.issues.createComment({ owner, repo, issue_number: issue.number, body: "The scheduled dependency audit is clean; closing this tracking issue." });
               await github.rest.issues.update({ owner, repo, issue_number: issue.number, state: "closed", state_reason: "completed" });
             }
+      - name: Fail on audit tooling errors
+        if: steps.audit.outputs.exit_code != '0' && steps.audit.outputs.exit_code != '1'
+        run: |
+          echo "cargo audit could not inspect the dependency tree (exit ${{ steps.audit.outputs.exit_code }})." >&2
+          exit 1
