@@ -75,6 +75,11 @@ integer-scaled prototypes in `math_fixed.rs` — see `docs/verification.md`
 for the property list, the `cargo kani` command, and the documented `f64`
 gap. `.github/workflows/kani.yml` runs it on every PR and nightly.
 
+The Soroban option contract source is in `contracts/options`. It escrows an
+explicitly configured SEP-41 token, mints seven-decimal option balances,
+accepts admin-authorized expiry fixings, and pays capped intrinsic value.
+See `contracts/options/README.md` for collateral semantics and build commands.
+
 The Soroban integration lives in `src/chain/`. A transaction is simulated
 first — the ledger footprint and the declared resources come from the
 simulation, never from a constant — and the resource fee is computed from

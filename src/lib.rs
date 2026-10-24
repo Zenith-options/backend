@@ -33,8 +33,10 @@ pub mod keeper;
 pub mod math_fixed;
 pub mod margin_fixed;
 pub mod models;
+pub mod operator;
 pub mod outbox;
 pub mod pagination;
+pub mod partial_exercise;
 pub mod payoff;
 pub mod preview;
 pub mod privacy;
@@ -48,6 +50,7 @@ pub mod prices;
 pub mod rate_limit_key;
 pub mod rewards;
 pub mod request_id;
+pub mod risk_stress;
 pub mod secrets;
 pub mod security_policy;
 pub mod settlement_notifications;
@@ -693,6 +696,10 @@ fn mutation_rate_limited_routes() -> Router<AppState> {
             "/api/v1/positions/:id/close",
             post(positions::close_position),
         )
+        .route(
+            "/api/v1/positions/:id/exercise",
+            post(partial_exercise::exercise_position),
+        )
         .route("/api/v1/positions/:id/roll", post(positions::roll_position))
         .route("/api/v1/watchlist", post(watchlist::add_watchlist))
         .route("/api/v1/alerts", post(alerts::create_alert))
@@ -721,6 +728,7 @@ pub fn build_router(state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(health))
+        .route("/admin/settlement", get(operator::settlement_dashboard))
         .route("/api/v1/spot", get(get_spot))
         .route("/api/v1/price", get(price_option))
         .route("/api/v1/iv", get(get_implied_vol))
@@ -783,6 +791,7 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/portfolio/greeks",
             get(positions::get_portfolio_greeks),
         )
+        .route("/api/v1/risk/stress", post(risk_stress::stress_portfolios))
         // ── Merkle-commitment batch settlement (#196) ──────────────────────
         .route(
             "/api/v1/settlement/batches",
