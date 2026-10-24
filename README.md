@@ -96,6 +96,31 @@ through the same projection step as the live indexer, and reports the ranges
 the node's retention window makes unrecoverable. See
 `docs/indexer-backfill.md`.
 
+Backups are two independent layers: Litestream streams the SQLite WAL to
+object storage continuously, and `scripts/backup.sh` takes checksummed
+snapshots to a separate bucket. `scripts/restore.sh` restores from either
+and validates the result. `docs/runbooks/disaster-recovery.md` lists every
+piece of durable state (including indexer cursors and on-chain sequence
+numbers) and the recovery procedure for each failure scenario.
+
+Liquidation shortfalls are never netted away silently: `src/insurance.rs`
+records each one as a deficit, covers it from an append-only insurance
+reserve as far as the reserve allows, and keeps the rest open until it's
+covered or explicitly written off. `GET /api/v1/insurance/coverage`
+publishes the reserve's coverage ratio. See `docs/insurance-reserve.md`.
+
+`SETTLEMENT_MODE=shadow` runs the on-chain settlement path next to the
+off-chain engine by simulation only and records every margin, payoff and
+expiry comparison; `shadow::cutover_readiness` turns that into a go/no-go
+for live settlement, and live mode keeps comparing to catch contract
+regressions. See `docs/shadow-mode.md`.
+
+`src/retention.rs` keeps the hot database bounded: per-table policies move
+expired indexer events, projections and other high-volume rows into
+sha256-checksummed JSONL archives (recorded in `archive_manifests`) before
+deleting them, while settlement records of truth are never purged. See
+`docs/data-retention.md`.
+
 
 ## Endpoints
 
@@ -128,6 +153,7 @@ All `/api/v1/*` endpoints marked **auth** require an
 | `GET /api/v1/chain` | Full option chain (calls+puts) across strikes for one expiry |
 | `GET /api/v1/expiries/:underlying` | Available expiries for an underlying |
 | `GET /api/v1/stats` | Protocol-wide stats (mocked, not derived from real trades) |
+| `GET /api/v1/insurance/coverage` | Insurance reserve balance, open deficits and coverage ratio |
 | `GET /api/v1/ws/spot` | WebSocket: snapshot on connect, then a live tick every ~2s |
 | `POST /api/v1/portfolio/payoff` | Combined P&L curve for a set of caller-supplied legs (no auth — legs carry their own premium) |
 

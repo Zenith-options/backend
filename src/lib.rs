@@ -30,12 +30,14 @@ pub mod compliance;
 pub mod contract_pins;
 pub mod cutover;
 pub mod db;
+pub mod dr;
 pub mod error;
 pub mod expiry_assignment;
 pub mod history;
 pub mod governance;
 pub mod indexer;
 pub mod keeper;
+pub mod insurance;
 pub mod math_fixed;
 pub mod margin_fixed;
 pub mod models;
@@ -71,6 +73,8 @@ pub mod session_keys;
 pub mod settlement_review;
 pub mod settlement_queue;
 pub mod settlement_webhooks;
+pub mod retention;
+pub mod shadow;
 pub mod signing;
 pub mod soroban;
 pub mod strategies;
@@ -807,6 +811,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/stats", get(get_protocol_stats))
         .route("/api/v2/spot", get(api_version::get_spot_v2))
         .route("/api/versions/usage", get(api_version::usage))
+        .route("/api/v1/insurance/coverage", get(insurance::get_coverage))
         .merge(auth_rate_limited_routes())
         .merge(mutation_rate_limited_routes())
         .route("/api/v1/rfqs/:id", get(rfq::get_rfq))
