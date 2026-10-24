@@ -1,0 +1,73 @@
+name: Contract pins
+
+# The deployed settlement contracts must be provably the reviewed ones.
+# - manifest:   every PR touching the pins validates their structure.
+# - reproduce:  rebuild each pinned contract twice from its pinned commit in
+#               its digest-pinned image; both builds and the pin must agree.
+# - deployed:   nightly, confirm every deployed pinned contract still runs
+#               the pinned WASM (Soroban contracts can be upgraded in place).
+# See docs/contract-builds.md.
+on:
+  pull_request:
+    paths:
+      - deploy/contract-pins.json
+      - scripts/contracts.sh
+      - .github/workflows/contract-pins.yml
+  push:
+    branches: [main]
+    paths:
+      - deploy/contract-pins.json
+      - scripts/contracts.sh
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Pinned so the verifier itself is not a moving part.
+  STELLAR_CLI_VERSION: "23.1.4"
+
+jobs:
+  manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/contracts.sh check-manifest
+
+  reproduce:
+    needs: manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        network: [testnet, mainnet]
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/contracts.sh reproduce ${{ matrix.network }}
+
+  deployed:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: manifest
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        network: [testnet, mainnet]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Skip when nothing is deployed on this network
+        id: any
+        run: |
+          n=$(jq --arg net "${{ matrix.network }}" '[.contracts[] | select(.network == $net and .contract_id)] | length' deploy/contract-pins.json)
+          echo "count=$n" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.any.outputs.count != '0'
+      - name: Install Stellar CLI
+        if: steps.any.outputs.count != '0'
+        run: cargo install --locked stellar-cli --version "$STELLAR_CLI_VERSION"
+      - name: Verify deployed WASM hashes
+        if: steps.any.outputs.count != '0'
+        run: scripts/contracts.sh verify-deployed ${{ matrix.network }}
