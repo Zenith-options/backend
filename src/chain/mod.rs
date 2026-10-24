@@ -2,6 +2,8 @@ pub mod accounts;
 pub mod config;
 pub mod contracts;
 pub mod event_indexer;
+pub mod oracle_policy;
+pub mod transaction;
 pub mod transport;
 pub mod xdr;
 pub mod bindings;
