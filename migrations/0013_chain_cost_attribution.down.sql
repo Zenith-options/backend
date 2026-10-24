@@ -1,0 +1,11 @@
+DROP TABLE IF EXISTS chain_budget_breaches;
+DROP INDEX IF EXISTS idx_chain_budget_reservations_open;
+DROP TABLE IF EXISTS chain_budget_reservations;
+DROP TABLE IF EXISTS chain_budget_periods;
+DROP TABLE IF EXISTS chain_budget_policies;
+DROP TABLE IF EXISTS chain_cost_daily_rollup;
+DROP INDEX IF EXISTS idx_chain_cost_events_series;
+DROP INDEX IF EXISTS idx_chain_cost_events_account;
+DROP INDEX IF EXISTS idx_chain_cost_events_time;
+DROP INDEX IF EXISTS idx_chain_cost_events_action;
+DROP TABLE IF EXISTS chain_cost_events;
