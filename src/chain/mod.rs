@@ -36,6 +36,7 @@ pub mod simulate;
 pub mod submit;
 pub mod tx_builder;
 pub mod types;
+pub mod sac_deposit;
 
 pub use accounts::{
     AccountPool, AccountPoolConfig, ChannelAccount, ChannelLease, ChannelPoolError,
@@ -67,6 +68,7 @@ pub use merkle::{
 pub use readiness::{check_wallet_readiness, ReadinessItem, ReadinessReport};
 pub use relayer::{FeeBumpRelayer, RelayerError, SponsorshipPolicy};
 pub use rpc::{LedgerEntryInfo, SorobanRpcClient};
+pub use sac_deposit::{SacAsset, SacDepositManager};
 pub use simulate::{
     footprint_hash, resource_fee_for, ResourcePricing, SimulatedTransaction, SimulationError,
     SorobanSimulator,
