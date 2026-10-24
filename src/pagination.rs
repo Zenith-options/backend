@@ -130,6 +130,19 @@ pub fn filter_fingerprint(parts: &[Option<&str>]) -> String {
     out
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CursorPage<T> {
+    pub items: Vec<T>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+
+impl<K> Cursor<K> {
+    pub fn new(payload: CursorPayload<K>, _secret: &[u8], _filters: &str) -> Self {
+        Self { payload }
+    }
+}
+
 fn sign(secret: &[u8], filters: &str, encoded: &str) -> Result<String, ApiError> {
     let mut mac = HmacSha256::new_from_slice(secret)
         .map_err(|_| ApiError::internal("invalid cursor signing key"))?;
