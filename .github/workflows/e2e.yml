@@ -19,7 +19,7 @@ jobs:
         options: --standalone --enable-soroban-rpc
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Run E2E Test Suite

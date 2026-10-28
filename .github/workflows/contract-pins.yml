@@ -33,7 +33,7 @@ jobs:
   manifest:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: scripts/contracts.sh check-manifest
 
   reproduce:
@@ -45,7 +45,7 @@ jobs:
       matrix:
         network: [testnet, mainnet]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: scripts/contracts.sh reproduce ${{ matrix.network }}
 
   deployed:
@@ -57,7 +57,7 @@ jobs:
       matrix:
         network: [testnet, mainnet]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Skip when nothing is deployed on this network
         id: any
         run: |
