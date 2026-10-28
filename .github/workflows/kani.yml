@@ -25,6 +25,6 @@ jobs:
     # pathological case can't occupy a runner indefinitely.
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Run Kani proofs
         uses: model-checking/kani-github-action@v1
