@@ -85,6 +85,12 @@ pub mod watchlist;
 pub mod voting_power;
 pub mod strategy_execution;
 pub mod vault_controls;
+pub mod margin_calls;
+pub mod margin_call_api;
+pub mod triggers;
+pub mod trigger_api;
+pub mod series_adjustment;
+pub mod series_adjustment_api;
 
 // Kani proof harnesses for the fixed-point arithmetic in `math_fixed`
 // (issue #119). Only compiled under `cargo kani`, so normal builds and
@@ -663,6 +669,21 @@ pub async fn init_state() -> AppState {
     tokio::spawn(auth::cleanup_expired_loop(state.db.clone()));
     tokio::spawn(alerts::check_alerts_loop(state.clone()));
     tokio::spawn(prices::price_ingestion_loop(state.clone()));
+    // Margin-call deadline sweep: escalates expired calls to the liquidation
+    // engine every 60 seconds.
+    tokio::spawn(margin_calls::sweep_loop(
+        state.db.clone(),
+        margin_calls::MarginCallPolicy::default(),
+        std::time::Duration::from_secs(60),
+        std::sync::Arc::new(crate::margin_calls::NoopLiquidationTrigger),
+    ));
+    // Trigger-order evaluation sweep: driven by price ticks + periodic fallback.
+    tokio::spawn(triggers::trigger_sweep_loop(
+        state.db.clone(),
+        triggers::TriggerConfig::from_env(),
+        state.spot_tx.subscribe(),
+        std::sync::Arc::new(triggers::NoopTriggerSubmit),
+    ));
     state
 }
 
@@ -735,6 +756,15 @@ fn mutation_rate_limited_routes() -> Router<AppState> {
         .route("/api/v1/positions/:id/roll", post(positions::roll_position))
         .route("/api/v1/watchlist", post(watchlist::add_watchlist))
         .route("/api/v1/alerts", post(alerts::create_alert))
+        // ── Trigger orders (write) ────────────────────────────────────────
+        .route("/api/v1/triggers", post(trigger_api::post_create_trigger))
+        .route("/api/v1/triggers/:id/cancel", post(trigger_api::post_cancel_trigger))
+        .route("/api/v1/triggers/:id", axum::routing::patch(trigger_api::patch_amend_trigger))
+        // ── Series adjustments (write, operator-only) ─────────────────────
+        .route("/api/v1/admin/adjustments", post(series_adjustment_api::post_submit))
+        .route("/api/v1/admin/adjustments/:id/approve", post(series_adjustment_api::post_approve))
+        .route("/api/v1/admin/adjustments/:id/reject", post(series_adjustment_api::post_reject))
+        .route("/api/v1/admin/adjustments/:id/apply", post(series_adjustment_api::post_apply))
         .route(
             "/api/v1/strategies/execute",
             post(strategies::execute_strategy),
@@ -832,6 +862,17 @@ pub fn build_router_with_market_maker(
         .route("/api/v1/account", get(positions::get_account))
         .route("/api/v1/positions", get(positions::list_positions))
         .route("/api/v1/history", get(history::get_history))
+        // ── Margin-call lifecycle (issue #XX) ──────────────────────────────
+        .route("/api/v1/margin/calls", get(margin_call_api::list_margin_calls))
+        .route("/api/v1/margin/calls/open", get(margin_call_api::get_open_margin_call))
+        .route("/api/v1/account/margin", get(margin_call_api::get_margin_summary))
+        // ── Trigger orders ─────────────────────────────────────────────────
+        .route("/api/v1/triggers", get(trigger_api::get_list_triggers))
+        .route("/api/v1/triggers/:id", get(trigger_api::get_one_trigger))
+        // ── Series adjustments (read, operator-only) ──────────────────────
+        .route("/api/v1/admin/adjustments", get(series_adjustment_api::get_list))
+        .route("/api/v1/admin/adjustments/:id", get(series_adjustment_api::get_one))
+        .route("/api/v1/admin/adjustments/:id/history", get(series_adjustment_api::get_history))
         .route("/api/v1/watchlist", get(watchlist::get_watchlist))
         .route(
             "/api/v1/watchlist/:underlying",

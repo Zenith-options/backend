@@ -92,7 +92,10 @@ doc = false
 [[bin]]
 name = "settlement_saga"
 path = "fuzz_targets/settlement_saga.rs"
+test = false
+doc = false
 
+[[bin]]
 name = "min_received"
 path = "fuzz_targets/min_received.rs"
 test = false
