@@ -87,6 +87,8 @@ pub mod strategy_execution;
 pub mod vault_controls;
 pub mod margin_calls;
 pub mod margin_call_api;
+pub mod triggers;
+pub mod trigger_api;
 
 // Kani proof harnesses for the fixed-point arithmetic in `math_fixed`
 // (issue #119). Only compiled under `cargo kani`, so normal builds and
@@ -673,6 +675,13 @@ pub async fn init_state() -> AppState {
         std::time::Duration::from_secs(60),
         std::sync::Arc::new(crate::margin_calls::NoopLiquidationTrigger),
     ));
+    // Trigger-order evaluation sweep: driven by price ticks + periodic fallback.
+    tokio::spawn(triggers::trigger_sweep_loop(
+        state.db.clone(),
+        triggers::TriggerConfig::from_env(),
+        state.spot_tx.subscribe(),
+        std::sync::Arc::new(triggers::NoopTriggerSubmit),
+    ));
     state
 }
 
@@ -745,6 +754,10 @@ fn mutation_rate_limited_routes() -> Router<AppState> {
         .route("/api/v1/positions/:id/roll", post(positions::roll_position))
         .route("/api/v1/watchlist", post(watchlist::add_watchlist))
         .route("/api/v1/alerts", post(alerts::create_alert))
+        // ── Trigger orders (write) ────────────────────────────────────────
+        .route("/api/v1/triggers", post(trigger_api::post_create_trigger))
+        .route("/api/v1/triggers/:id/cancel", post(trigger_api::post_cancel_trigger))
+        .route("/api/v1/triggers/:id", axum::routing::patch(trigger_api::patch_amend_trigger))
         .route(
             "/api/v1/strategies/execute",
             post(strategies::execute_strategy),
@@ -846,6 +859,9 @@ pub fn build_router_with_market_maker(
         .route("/api/v1/margin/calls", get(margin_call_api::list_margin_calls))
         .route("/api/v1/margin/calls/open", get(margin_call_api::get_open_margin_call))
         .route("/api/v1/account/margin", get(margin_call_api::get_margin_summary))
+        // ── Trigger orders ─────────────────────────────────────────────────
+        .route("/api/v1/triggers", get(trigger_api::get_list_triggers))
+        .route("/api/v1/triggers/:id", get(trigger_api::get_one_trigger))
         .route("/api/v1/watchlist", get(watchlist::get_watchlist))
         .route(
             "/api/v1/watchlist/:underlying",
