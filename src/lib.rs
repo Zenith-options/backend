@@ -89,6 +89,8 @@ pub mod margin_calls;
 pub mod margin_call_api;
 pub mod triggers;
 pub mod trigger_api;
+pub mod series_adjustment;
+pub mod series_adjustment_api;
 
 // Kani proof harnesses for the fixed-point arithmetic in `math_fixed`
 // (issue #119). Only compiled under `cargo kani`, so normal builds and
@@ -758,6 +760,11 @@ fn mutation_rate_limited_routes() -> Router<AppState> {
         .route("/api/v1/triggers", post(trigger_api::post_create_trigger))
         .route("/api/v1/triggers/:id/cancel", post(trigger_api::post_cancel_trigger))
         .route("/api/v1/triggers/:id", axum::routing::patch(trigger_api::patch_amend_trigger))
+        // ── Series adjustments (write, operator-only) ─────────────────────
+        .route("/api/v1/admin/adjustments", post(series_adjustment_api::post_submit))
+        .route("/api/v1/admin/adjustments/:id/approve", post(series_adjustment_api::post_approve))
+        .route("/api/v1/admin/adjustments/:id/reject", post(series_adjustment_api::post_reject))
+        .route("/api/v1/admin/adjustments/:id/apply", post(series_adjustment_api::post_apply))
         .route(
             "/api/v1/strategies/execute",
             post(strategies::execute_strategy),
@@ -862,6 +869,10 @@ pub fn build_router_with_market_maker(
         // ── Trigger orders ─────────────────────────────────────────────────
         .route("/api/v1/triggers", get(trigger_api::get_list_triggers))
         .route("/api/v1/triggers/:id", get(trigger_api::get_one_trigger))
+        // ── Series adjustments (read, operator-only) ──────────────────────
+        .route("/api/v1/admin/adjustments", get(series_adjustment_api::get_list))
+        .route("/api/v1/admin/adjustments/:id", get(series_adjustment_api::get_one))
+        .route("/api/v1/admin/adjustments/:id/history", get(series_adjustment_api::get_history))
         .route("/api/v1/watchlist", get(watchlist::get_watchlist))
         .route(
             "/api/v1/watchlist/:underlying",

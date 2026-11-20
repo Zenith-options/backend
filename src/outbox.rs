@@ -152,6 +152,22 @@ pub struct MarginCallEscalatedPayload {
     pub deficit: i64,
 }
 
+/// Series corporate-action adjustment event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeriesAdjustedPayload {
+    pub version: u32,
+    pub adjustment_id: String,
+    pub series_id: i64,
+    pub underlying: String,
+    /// "redenomination" | "sac_migration" | "delisting"
+    pub kind: String,
+    pub old_strike_scaled: i64,
+    pub new_strike_scaled: i64,
+    pub ratio_numerator: i64,
+    pub ratio_denominator: i64,
+    pub occurred_at: String,
+}
+
 /// Trigger-order lifecycle event (armed / fired / cancelled).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TriggerEventPayload {
@@ -185,6 +201,7 @@ pub enum DomainEvent {
     TriggerArmed(TriggerEventPayload),
     TriggerFired(TriggerEventPayload),
     TriggerCancelled(TriggerEventPayload),
+    SeriesAdjusted(SeriesAdjustedPayload),
 }
 }
 
@@ -207,6 +224,7 @@ impl DomainEvent {
             DomainEvent::TriggerArmed(p) => ("trigger", &p.trigger_id, "trigger_armed"),
             DomainEvent::TriggerFired(p) => ("trigger", &p.trigger_id, "trigger_fired"),
             DomainEvent::TriggerCancelled(p) => ("trigger", &p.trigger_id, "trigger_cancelled"),
+            DomainEvent::SeriesAdjusted(p) => ("series", &p.adjustment_id, "series_adjusted"),
         }
     }
 
