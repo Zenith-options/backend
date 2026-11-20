@@ -85,6 +85,8 @@ pub mod watchlist;
 pub mod voting_power;
 pub mod strategy_execution;
 pub mod vault_controls;
+pub mod margin_calls;
+pub mod margin_call_api;
 
 // Kani proof harnesses for the fixed-point arithmetic in `math_fixed`
 // (issue #119). Only compiled under `cargo kani`, so normal builds and
@@ -663,6 +665,14 @@ pub async fn init_state() -> AppState {
     tokio::spawn(auth::cleanup_expired_loop(state.db.clone()));
     tokio::spawn(alerts::check_alerts_loop(state.clone()));
     tokio::spawn(prices::price_ingestion_loop(state.clone()));
+    // Margin-call deadline sweep: escalates expired calls to the liquidation
+    // engine every 60 seconds.
+    tokio::spawn(margin_calls::sweep_loop(
+        state.db.clone(),
+        margin_calls::MarginCallPolicy::default(),
+        std::time::Duration::from_secs(60),
+        std::sync::Arc::new(crate::margin_calls::NoopLiquidationTrigger),
+    ));
     state
 }
 
@@ -832,6 +842,10 @@ pub fn build_router_with_market_maker(
         .route("/api/v1/account", get(positions::get_account))
         .route("/api/v1/positions", get(positions::list_positions))
         .route("/api/v1/history", get(history::get_history))
+        // ── Margin-call lifecycle (issue #XX) ──────────────────────────────
+        .route("/api/v1/margin/calls", get(margin_call_api::list_margin_calls))
+        .route("/api/v1/margin/calls/open", get(margin_call_api::get_open_margin_call))
+        .route("/api/v1/account/margin", get(margin_call_api::get_margin_summary))
         .route("/api/v1/watchlist", get(watchlist::get_watchlist))
         .route(
             "/api/v1/watchlist/:underlying",
