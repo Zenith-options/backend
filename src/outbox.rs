@@ -152,6 +152,21 @@ pub struct MarginCallEscalatedPayload {
     pub deficit: i64,
 }
 
+/// Liquidation auction lifecycle event (opened / settled / fallback).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuctionEventPayload {
+    pub version: u32,
+    pub auction_id: String,
+    pub lot_id: String,
+    pub liquidation_id: String,
+    pub collateral_asset: String,
+    pub quantity: i64,
+    pub reserve_price: i64,
+    pub close_ledger: i64,
+    pub status: String,
+    pub occurred_at: String,
+}
+
 /// Series corporate-action adjustment event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SeriesAdjustedPayload {
@@ -202,6 +217,8 @@ pub enum DomainEvent {
     TriggerFired(TriggerEventPayload),
     TriggerCancelled(TriggerEventPayload),
     SeriesAdjusted(SeriesAdjustedPayload),
+    AuctionOpened(AuctionEventPayload),
+    AuctionSettled(AuctionEventPayload),
 }
 }
 
@@ -225,6 +242,8 @@ impl DomainEvent {
             DomainEvent::TriggerFired(p) => ("trigger", &p.trigger_id, "trigger_fired"),
             DomainEvent::TriggerCancelled(p) => ("trigger", &p.trigger_id, "trigger_cancelled"),
             DomainEvent::SeriesAdjusted(p) => ("series", &p.adjustment_id, "series_adjusted"),
+            DomainEvent::AuctionOpened(p) => ("auction", &p.lot_id, "auction_opened"),
+            DomainEvent::AuctionSettled(p) => ("auction", &p.lot_id, "auction_settled"),
         }
     }
 

@@ -14,6 +14,7 @@ pub mod handlers;
 pub mod indexer;
 pub mod limits;
 pub mod liquidation_policy;
+pub mod liquidation;
 pub mod merkle;
 pub mod mode;
 pub mod observability;

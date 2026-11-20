@@ -684,6 +684,14 @@ pub async fn init_state() -> AppState {
         state.spot_tx.subscribe(),
         std::sync::Arc::new(triggers::NoopTriggerSubmit),
     ));
+    // Liquidation auction sweep: closes+settles due auction lots.
+    tokio::spawn(crate::chain::liquidation::auction::auction_sweep_loop(
+        state.db.clone(),
+        crate::chain::liquidation::auction::AuctionConfig::default(),
+        std::time::Duration::from_secs(30),
+        std::sync::Arc::new(crate::chain::liquidation::auction::NoopAuctionSettler),
+        std::sync::Arc::new(crate::chain::liquidation::auction::DefaultFallback),
+    ));
     state
 }
 
@@ -765,6 +773,12 @@ fn mutation_rate_limited_routes() -> Router<AppState> {
         .route("/api/v1/admin/adjustments/:id/approve", post(series_adjustment_api::post_approve))
         .route("/api/v1/admin/adjustments/:id/reject", post(series_adjustment_api::post_reject))
         .route("/api/v1/admin/adjustments/:id/apply", post(series_adjustment_api::post_apply))
+        // ── Liquidation auction (write) ───────────────────────────────────
+        .route("/api/v1/auction/lots", post(crate::chain::liquidation::auction_api::post_create_lot))
+        .route("/api/v1/auction/lots/:id/reserve", post(crate::chain::liquidation::auction_api::post_update_reserve))
+        .route("/api/v1/auction/lots/:id/bids", post(crate::chain::liquidation::auction_api::post_submit_bid))
+        .route("/api/v1/auction/bids/:id/reveal", post(crate::chain::liquidation::auction_api::post_reveal_bid))
+        .route("/api/v1/auction/lots/:id/settle", post(crate::chain::liquidation::auction_api::post_settle))
         .route(
             "/api/v1/strategies/execute",
             post(strategies::execute_strategy),
@@ -873,6 +887,11 @@ pub fn build_router_with_market_maker(
         .route("/api/v1/admin/adjustments", get(series_adjustment_api::get_list))
         .route("/api/v1/admin/adjustments/:id", get(series_adjustment_api::get_one))
         .route("/api/v1/admin/adjustments/:id/history", get(series_adjustment_api::get_history))
+        // ── Liquidation auction (read) ─────────────────────────────────────
+        .route("/api/v1/auction/lots", get(crate::chain::liquidation::auction_api::get_list_lots))
+        .route("/api/v1/auction/lots/:id", get(crate::chain::liquidation::auction_api::get_one_lot))
+        .route("/api/v1/auction/lots/:id/bids", get(crate::chain::liquidation::auction_api::get_list_bids))
+        .route("/api/v1/auction/lots/:id/bonds", get(crate::chain::liquidation::auction_api::get_bonds))
         .route("/api/v1/watchlist", get(watchlist::get_watchlist))
         .route(
             "/api/v1/watchlist/:underlying",
