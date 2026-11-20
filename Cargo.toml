@@ -17,11 +17,6 @@ edition = "2021"
 # a Postgres sqlx driver) that is not part of this crate's dependency set.
 autobins = false
 
-# Only the targets declared below are built. `src/bin/` also holds tool
-# scripts from earlier iterations that were never wired into this package's
-# dependency set; automatic discovery would try to build them all.
-autobins = false
-
 [[bin]]
 name = "zenith-backend"
 path = "src/main.rs"
@@ -70,16 +65,11 @@ utoipa = { version = "5", features = ["axum_extras", "time"] }
 utoipa-swagger-ui = { version = "8", features = ["axum"] }
 async-trait = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-chrono = "0.4"
-base64 = "0.22"
-futures = "0.3"
-rust_decimal = "1"
-validator = { version = "0.18", features = ["derive"] }
-utoipa = { version = "4", features = ["axum_extras"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 proptest = "1"
+anyhow = "1"
 
 # `cfg(kani)` is defined by the Kani verifier (see src/kani_proofs.rs);
 # declare it here so rustc's check-cfg lint accepts it in normal builds too.

@@ -104,6 +104,68 @@ pub struct LiquidatedPayload {
     pub liquidated_at: String,
 }
 
+// ─── Margin-call lifecycle events ────────────────────────────────────────────
+
+/// Emitted when a margin call is first opened for an account.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarginCallOpenedPayload {
+    pub version: u32,
+    /// Unique id of the margin call record.
+    pub call_id: String,
+    pub wallet_address: String,
+    /// Triggering deficit in 10^7 fixed-point units.
+    pub deficit: i64,
+    /// Required top-up to restore initial margin (10^7 units).
+    pub required_top_up: i64,
+    /// ISO-8601 UTC wall-clock cure deadline.
+    pub cure_deadline: String,
+    /// Ledger-sequence cure deadline.
+    pub deadline_ledger: i64,
+    pub opened_at: String,
+}
+
+/// Emitted when a margin call transitions to `cured` or `partially_cured`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarginCallResolvedPayload {
+    pub version: u32,
+    pub call_id: String,
+    pub wallet_address: String,
+    /// "cured" | "partially_cured"
+    pub outcome: String,
+    pub resolved_at: String,
+    pub resolved_at_ledger: i64,
+    /// Amount actually topped up (10^7 units), if known.
+    pub cured_amount: Option<i64>,
+}
+
+/// Emitted when a margin call expires and is handed off to the liquidation
+/// engine.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarginCallEscalatedPayload {
+    pub version: u32,
+    pub call_id: String,
+    pub wallet_address: String,
+    /// "expired" | "escalated"
+    pub outcome: String,
+    pub resolved_at: String,
+    pub resolved_at_ledger: i64,
+    pub deficit: i64,
+}
+
+/// Trigger-order lifecycle event (armed / fired / cancelled).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriggerEventPayload {
+    pub version: u32,
+    pub trigger_id: String,
+    pub wallet_address: String,
+    pub trigger_type: String,
+    pub underlying: String,
+    pub trigger_price: f64,
+    /// Current status at the time the event was emitted.
+    pub status: String,
+    pub occurred_at: String,
+}
+
 /// The typed domain-event vocabulary. Serialized into the outbox `payload`
 /// column with the event type as a tag and the schema version alongside the
 /// event-specific fields, e.g.
@@ -117,6 +179,13 @@ pub enum DomainEvent {
     AlertTriggered(AlertTriggeredPayload),
     Settled(SettledPayload),
     Liquidated(LiquidatedPayload),
+    MarginCallOpened(MarginCallOpenedPayload),
+    MarginCallResolved(MarginCallResolvedPayload),
+    MarginCallEscalated(MarginCallEscalatedPayload),
+    TriggerArmed(TriggerEventPayload),
+    TriggerFired(TriggerEventPayload),
+    TriggerCancelled(TriggerEventPayload),
+}
 }
 
 impl DomainEvent {
@@ -132,6 +201,12 @@ impl DomainEvent {
             DomainEvent::AlertTriggered(p) => ("alert", &p.alert_id, "alert_triggered"),
             DomainEvent::Settled(p) => ("position", &p.position_id, "settled"),
             DomainEvent::Liquidated(p) => ("position", &p.position_id, "liquidated"),
+            DomainEvent::MarginCallOpened(p) => ("margin_call", &p.call_id, "margin_call_opened"),
+            DomainEvent::MarginCallResolved(p) => ("margin_call", &p.call_id, "margin_call_resolved"),
+            DomainEvent::MarginCallEscalated(p) => ("margin_call", &p.call_id, "margin_call_escalated"),
+            DomainEvent::TriggerArmed(p) => ("trigger", &p.trigger_id, "trigger_armed"),
+            DomainEvent::TriggerFired(p) => ("trigger", &p.trigger_id, "trigger_fired"),
+            DomainEvent::TriggerCancelled(p) => ("trigger", &p.trigger_id, "trigger_cancelled"),
         }
     }
 
