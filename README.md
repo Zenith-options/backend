@@ -319,3 +319,8 @@ rather than just assumed from reading the SQL.
 ## License
 
 MIT © Zenith Protocol Contributors
+
+## Handsoff notes
+
+<!-- handsoff-issue-381 -->
+- #381: API list endpoints fetch full rows when only a count is needed

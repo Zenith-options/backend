@@ -5,6 +5,10 @@
 //! cargo bench --bench iv
 //! ```
 //!
+//! Each case prints a line like `implied_vol/<label>  time: [lo mid hi]`; the
+//! `mid` estimate is the per-call solver cost (setup is excluded from the timed
+//! section), and the bracketed range shows run-to-run variance.
+//!
 //! The benchmark exercises the safeguarded Newton/Brent solver across a grid
 //! of moneyness, expiry and volatility values that cover the acceptance
 //! criteria of issue #21 (vol in [0.01, 10], T in [1 hour, 3 years],
@@ -64,6 +68,8 @@ fn bench_implied_vol(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
 
     for case in &cases {
+        // Setup: build the input vector once, outside the timed closure, so the
+        // measured section reflects solver cost only (no per-iteration alloc).
         let price = black_scholes(
             case.option_type,
             case.spot,
@@ -74,16 +80,26 @@ fn bench_implied_vol(c: &mut Criterion) {
             case.vol,
         );
 
-        group.bench_with_input(BenchmarkId::from_parameter(case.label), &price, |b, &price| {
+        let inputs = [
+            case.option_type,
+            case.spot,
+            case.strike,
+            case.rate,
+            case.dividend,
+            case.expiry,
+            price,
+        ];
+
+        group.bench_with_input(BenchmarkId::from_parameter(case.label), &inputs, |b, inputs| {
             b.iter(|| {
                 let iv = implied_vol(
-                    black_box(case.option_type),
-                    black_box(case.spot),
-                    black_box(case.strike),
-                    black_box(case.rate),
-                    black_box(case.dividend),
-                    black_box(case.expiry),
-                    black_box(price),
+                    black_box(inputs[0]),
+                    black_box(inputs[1]),
+                    black_box(inputs[2]),
+                    black_box(inputs[3]),
+                    black_box(inputs[4]),
+                    black_box(inputs[5]),
+                    black_box(inputs[6]),
                 );
                 black_box(iv)
             });
