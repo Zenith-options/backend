@@ -319,3 +319,8 @@ rather than just assumed from reading the SQL.
 ## License
 
 MIT © Zenith Protocol Contributors
+
+## Handsoff notes
+
+<!-- handsoff-issue-417 -->
+- #417: Settlement worker logs no context when a saga step fails
