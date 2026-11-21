@@ -319,3 +319,8 @@ rather than just assumed from reading the SQL.
 ## License
 
 MIT © Zenith Protocol Contributors
+
+## Handsoff notes
+
+<!-- handsoff-issue-397 -->
+- #397: `docs/chain-costs.md` fee table no longer matches the fee constants in the code
