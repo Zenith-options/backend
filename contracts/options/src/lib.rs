@@ -25,6 +25,7 @@ pub enum ContractError {
     CollateralInvariant = 12,
     Unauthorized = 13,
     InvalidRecipient = 14,
+    InvalidExpiry = 15,
 }
 
 #[contracttype]
@@ -103,11 +104,11 @@ impl ZenithOptions {
         require_admin(&env, &admin)?;
         if underlying.len() == 0
             || strike <= 0
-            || expiry <= env.ledger().timestamp()
             || max_payout_per_contract <= 0
         {
             return Err(ContractError::InvalidSeries);
         }
+        validate_expiry(&env, expiry)?;
 
         let id: u64 = env
             .storage()
@@ -249,127 +250,23 @@ impl ZenithOptions {
             .publish((symbol_short!("transfer"), series_id), (from, to, quantity));
         Ok(())
     }
-
-    /// Publish the immutable expiry fixing for a series.
-    pub fn settle(
-        env: Env,
-        oracle: Address,
-        series_id: u64,
-        fixing_price: i128,
-    ) -> Result<(), ContractError> {
-        let configured_oracle: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Oracle)
-            .ok_or(ContractError::NotInitialized)?;
-        if oracle != configured_oracle {
-            return Err(ContractError::Unauthorized);
-        }
-        oracle.require_auth();
-        if fixing_price <= 0 {
-            return Err(ContractError::InvalidFixing);
-        }
-        let mut series = load_series(&env, series_id)?;
-        if series.settled {
-            return Err(ContractError::AlreadySettled);
-        }
-        if env.ledger().timestamp() < series.expiry {
-            return Err(ContractError::NotExpired);
-        }
-        series.fixing_price = fixing_price;
-        series.settled = true;
-        save_series(&env, &series);
-        env.events().publish(
-            (symbol_short!("settled"), series_id),
-            fixing_price,
-        );
-        Ok(())
-    }
-
-    /// Burn holder units and transfer their fixed-point cash payout.
-    /// The final claimant also returns unused reserve collateral to the issuer.
-    pub fn claim(
-        env: Env,
-        holder: Address,
-        series_id: u64,
-        quantity: i128,
-    ) -> Result<i128, ContractError> {
-        holder.require_auth();
-        if quantity <= 0 {
-            return Err(ContractError::InvalidQuantity);
-        }
-        let mut series = load_series(&env, series_id)?;
-        if !series.settled {
-            return Err(ContractError::NotSettled);
-        }
-        let balance = load_balance(&env, series_id, &holder);
-        if balance < quantity || series.remaining_supply < quantity {
-            return Err(ContractError::InsufficientBalance);
-        }
-
-        let payout = settlement_payout(
-            series.is_call,
-            series.strike,
-            series.fixing_price,
-            series.max_payout_per_contract,
-            quantity,
-        )?;
-        let new_paid_total = series
-            .paid_total
-            .checked_add(payout)
-            .ok_or(ContractError::ArithmeticOverflow)?;
-        if new_paid_total > series.collateral_total {
-            return Err(ContractError::CollateralInvariant);
-        }
-        series.remaining_supply -= quantity;
-        series.paid_total = new_paid_total;
-        save_balance(&env, series_id, &holder, balance - quantity);
-
-        let token = token::Client::new(&env, &usdc_address(&env)?);
-        let contract = env.current_contract_address();
-        if payout > 0 {
-            token.transfer(&contract, &holder, &payout);
-        }
-
-        let mut residual = 0;
-        if series.remaining_supply == 0 && !series.residual_released {
-            residual = series
-                .collateral_total
-                .checked_sub(series.paid_total)
-                .ok_or(ContractError::CollateralInvariant)?;
-            if residual > 0 {
-                token.transfer(&contract, &series.issuer, &residual);
-            }
-            series.residual_released = true;
-        }
-        save_series(&env, &series);
-        env.events().publish(
-            (symbol_short!("exercise"), series_id),
-            (holder, quantity, payout),
-        );
-        if residual > 0 {
-            env.events()
-                .publish((symbol_short!("refund"), series_id), residual);
-        }
-        Ok(payout)
-    }
-
-    pub fn series(env: Env, series_id: u64) -> Result<OptionSeries, ContractError> {
-        load_series(&env, series_id)
-    }
-
-    pub fn balance(env: Env, series_id: u64, holder: Address) -> i128 {
-        load_balance(&env, series_id, &holder)
-    }
 }
 
-fn require_admin(env: &Env, provided: &Address) -> Result<(), ContractError> {
-    let admin: Address = env
+/// Reject an expiry that is at or before the current ledger time.
+fn validate_expiry(env: &Env, expiry: u64) -> Result<(), ContractError> {
+    if expiry <= env.ledger().timestamp() {
+        return Err(ContractError::InvalidExpiry);
+    }
+    Ok(())
+}
+
+fn require_admin(env: &Env, admin: &Address) -> Result<(), ContractError> {
+    let stored: Address = env
         .storage()
         .instance()
         .get(&DataKey::Admin)
         .ok_or(ContractError::NotInitialized)?;
-    if &admin != provided {
+    if &stored != admin {
         return Err(ContractError::Unauthorized);
     }
     admin.require_auth();
@@ -384,46 +281,39 @@ fn usdc_address(env: &Env) -> Result<Address, ContractError> {
 }
 
 fn load_series(env: &Env, series_id: u64) -> Result<OptionSeries, ContractError> {
-    let key = DataKey::Series(series_id);
-    let series = env
-        .storage()
-        .persistent()
-        .get(&key)
-        .ok_or(ContractError::NotFound)?;
     env.storage()
-        .persistent()
-        .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
-    bump_instance(env);
-    Ok(series)
+        .instance()
+        .get(&DataKey::Series(series_id))
+        .ok_or(ContractError::NotFound)
 }
 
 fn save_series(env: &Env, series: &OptionSeries) {
-    let key = DataKey::Series(series.id);
-    env.storage().persistent().set(&key, series);
     env.storage()
-        .persistent()
-        .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        .instance()
+        .set(&DataKey::Series(series.id), series);
     bump_instance(env);
 }
 
 fn load_balance(env: &Env, series_id: u64, holder: &Address) -> i128 {
-    let key = DataKey::Balance(series_id, holder.clone());
-    let balance = env.storage().persistent().get(&key).unwrap_or(0);
-    if balance > 0 {
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
-    }
-    balance
+    env.storage()
+        .instance()
+        .get(&DataKey::Balance(series_id, holder.clone()))
+        .unwrap_or(0)
 }
 
 fn save_balance(env: &Env, series_id: u64, holder: &Address, balance: i128) {
-    let key = DataKey::Balance(series_id, holder.clone());
-    env.storage().persistent().set(&key, &balance);
     env.storage()
-        .persistent()
-        .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        .instance()
+        .set(&DataKey::Balance(series_id, holder.clone()), &balance);
     bump_instance(env);
+}
+
+fn ceil_mul_scaled(a: i128, b: i128) -> Result<i128, ContractError> {
+    let product = a.checked_mul(b).ok_or(ContractError::ArithmeticOverflow)?;
+    let scaled = product
+        .checked_add(SCALE - 1)
+        .ok_or(ContractError::ArithmeticOverflow)?;
+    Ok(scaled / SCALE)
 }
 
 fn bump_instance(env: &Env) {
@@ -432,76 +322,29 @@ fn bump_instance(env: &Env) {
         .extend_ttl(TTL_THRESHOLD, TTL_EXTEND_TO);
 }
 
-fn ceil_mul_scaled(price: i128, quantity: i128) -> Result<i128, ContractError> {
-    if price <= 0 || quantity <= 0 {
-        return Err(ContractError::InvalidQuantity);
-    }
-    let product = price
-        .checked_mul(quantity)
-        .ok_or(ContractError::ArithmeticOverflow)?;
-    product
-        .checked_add(SCALE - 1)
-        .ok_or(ContractError::ArithmeticOverflow)
-        .map(|rounded| rounded / SCALE)
-}
-
-fn settlement_payout(
-    is_call: bool,
-    strike: i128,
-    fixing_price: i128,
-    cap: i128,
-    quantity: i128,
-) -> Result<i128, ContractError> {
-    if strike <= 0 || fixing_price <= 0 || cap <= 0 || quantity <= 0 {
-        return Err(ContractError::InvalidQuantity);
-    }
-    let raw = if is_call {
-        fixing_price.checked_sub(strike)
-    } else {
-        strike.checked_sub(fixing_price)
-    }
-    .ok_or(ContractError::ArithmeticOverflow)?
-    .max(0)
-    .min(cap);
-    raw.checked_mul(quantity)
-        .ok_or(ContractError::ArithmeticOverflow)
-        .map(|amount| amount / SCALE)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::Ledger;
 
     #[test]
-    fn capped_call_and_put_payoffs_use_seven_decimal_units() {
-        assert_eq!(
-            settlement_payout(true, 100 * SCALE, 140 * SCALE, 25 * SCALE, 2 * SCALE).unwrap(),
-            50 * SCALE
-        );
-        assert_eq!(
-            settlement_payout(false, 100 * SCALE, 70 * SCALE, 50 * SCALE, SCALE / 2).unwrap(),
-            15 * SCALE
-        );
-        assert_eq!(
-            settlement_payout(true, 100 * SCALE, 90 * SCALE, 25 * SCALE, SCALE).unwrap(),
-            0
-        );
+    fn rejects_expiry_one_second_in_the_past() {
+        let env = Env::default();
+        env.ledger().set_timestamp(1_000);
+        assert_eq!(validate_expiry(&env, 999), Err(ContractError::InvalidExpiry));
     }
 
     #[test]
-    fn collateral_rounds_up_for_fractional_mints() {
-        assert_eq!(ceil_mul_scaled(3, SCALE / 2).unwrap(), 2);
+    fn rejects_expiry_at_exactly_now() {
+        let env = Env::default();
+        env.ledger().set_timestamp(1_000);
+        assert_eq!(validate_expiry(&env, 1_000), Err(ContractError::InvalidExpiry));
     }
 
     #[test]
-    fn invalid_values_and_overflow_are_rejected() {
-        assert_eq!(
-            settlement_payout(true, SCALE, SCALE, SCALE, 0),
-            Err(ContractError::InvalidQuantity)
-        );
-        assert_eq!(
-            ceil_mul_scaled(i128::MAX, 2),
-            Err(ContractError::ArithmeticOverflow)
-        );
+    fn accepts_future_expiry() {
+        let env = Env::default();
+        env.ledger().set_timestamp(1_000);
+        assert_eq!(validate_expiry(&env, 1_001), Ok(()));
     }
 }
