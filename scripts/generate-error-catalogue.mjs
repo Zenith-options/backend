@@ -6,6 +6,13 @@ const lines = [
   "",
   "This file is generated from `docs/error-codes.json`. Error codes are stable API identifiers; clients must not branch on message text.",
   "",
+  "## Adding a new error code",
+  "",
+  "1. Add the new code to the source that raises it.",
+  "2. Add a matching entry (`code`, `http_status`, `description`) to `docs/error-codes.json`.",
+  "3. Regenerate this catalogue by running `node scripts/generate-error-catalogue.mjs` from the repository root.",
+  "4. Commit both `docs/error-codes.json` and the regenerated `docs/error-catalogue.md` together.",
+  "",
   "| Code | HTTP status | Meaning |",
   "|---|---:|---|",
   ...entries.map(({ code, http_status, description }) =>

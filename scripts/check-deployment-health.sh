@@ -8,7 +8,9 @@ if [[ -z "$url" ]]; then
 fi
 
 for attempt in $(seq 1 24); do
-  if curl --fail --silent --show-error "$url" >/dev/null 2>&1; then
+  curl_status=0
+  curl --fail --silent --show-error "$url" >/dev/null 2>&1 || curl_status=$?
+  if [[ "$curl_status" -eq 0 ]]; then
     echo "Deployment health check passed"
     exit 0
   fi

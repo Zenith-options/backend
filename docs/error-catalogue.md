@@ -1,9 +1,25 @@
-# API error catalogue
+# Error Catalogue
 
-This file is generated from `docs/error-codes.json`. Error codes are stable API identifiers; clients must not branch on message text.
+This document lists the error codes returned by the API and how they map to HTTP statuses, contract codes, and RPC codes. The canonical source of truth is [`docs/error-codes.json`](./error-codes.json); this catalogue is generated from it.
 
-| Code | HTTP status | Meaning |
-|---|---:|---|
+## Adding a new error code
+
+1. Add the code to the source (the API/contract/RPC layer that emits it).
+2. Add a matching entry to [`docs/error-codes.json`](./error-codes.json) with its `code`, `http_status`, `description`, and any `contract_code`/`rpc_code`.
+3. Regenerate this catalogue from the JSON:
+   ```bash
+   node scripts/generate-error-catalogue.mjs
+   ```
+4. Commit both `docs/error-codes.json` and the regenerated `docs/error-catalogue.md` together.
+
+Do not hand-edit the generated sections of this file; edit `error-codes.json` and re-run the generator instead.
+
+## Codes
+
+<!-- The table below is generated from docs/error-codes.json. -->
+
+| Code | HTTP status | Description |
+| --- | --- | --- |
 | `CLIENT_ERROR` | 400 | Unclassified client-side failure. |
 | `CONFLICT` | 409 | The request conflicts with current resource state. |
 | `FORBIDDEN` | 403 | The authenticated caller is not permitted to perform this operation. |
