@@ -1,0 +1,49 @@
+# deny.toml - Issue #364
+# License allowlist fix - ensures all current dependencies are allowed
+
+[advisories]
+vulnerability = "deny"
+unmaintained = "warn"
+yanked = "warn"
+notice = "warn"
+
+[licenses]
+# Confidence level for detecting licenses
+confidence-threshold = 0.8
+
+# Allowed licenses - updated to include licenses from current dependencies
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT OR Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-DFS-2016",
+]
+
+# Explicitly allowed crates with less common licenses
+# Add entries here if a crate's license is compatible but not in allow list
+exceptions = [
+    # Format: { name = "crate-name", version = "0.1.0", license = "License-Name" }
+]
+
+[bans]
+multiple-versions = "warn"
+# Lint-time direct dependency duplicates
+# for example, 2 versions of getrandom can be used without raising a warning,
+# because they are both required by other dependencies
+allow-duplicate-crates = false
+
+# Note: To run the check locally:
+# cargo deny check licenses
+#
+# If a license is rejected:
+# 1. Run: cargo deny check licenses --show-stats
+# 2. Find the offending crate
+# 3. Either:
+#    a) Add the license to the 'allow' list (if compatible)
+#    b) Add an exception entry (if crate needs special handling)
+#    c) Replace/pin the dependency to one with compatible license
