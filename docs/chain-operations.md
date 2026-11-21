@@ -6,4 +6,4 @@ Privileged signing is default-deny: the contract and method must be allowlisted 
 
 `CHAIN_MODE=paper` performs no RPC requests, `shadow` indexes and compares without changing user state, and `live` treats chain state as authoritative. Live mode fails closed during degradation and never falls back to paper accounting.
 
-Start a disposable network with `make chain-local-up`, then deploy pinned contract WASM using a preconfigured secret-backed Stellar identity with `make chain-local-deploy`. The generated JSON descriptor is the contract registry input.
+Start a disposable network with `make chain-up`, then deploy pinned contract WASM using a preconfigured secret-backed Stellar identity with `make chain-deploy`. The generated JSON descriptor is the contract registry input.
