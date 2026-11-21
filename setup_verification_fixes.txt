@@ -1,0 +1,147 @@
+# Issues #360, #359, #358, #357 - Setup & Verification Fixes
+
+## #360 - OpenAPI Spec Verification Target
+
+Add to Makefile:
+
+.PHONY: check-openapi
+
+check-openapi:
+	@echo "Checking OpenAPI spec and generated SDKs..."
+	node scripts/check-settlement-openapi.mjs
+	@echo "✓ OpenAPI spec and SDKs are in sync"
+
+Add to docs/api-versioning-policy.md:
+
+### Verifying OpenAPI Consistency
+
+Before opening a PR that modifies routes:
+
+```bash
+make check-openapi
+```
+
+This command:
+1. Regenerates the OpenAPI spec from route definitions
+2. Verifies openapi/openapi.yaml matches server routes
+3. Regenerates sdk/typescript/src/zenith.ts
+4. Fails with diff if spec or SDK is out of sync
+
+---
+
+## #359 - Error Catalogue Verification
+
+Update scripts/generate-error-catalogue.mjs to add --check mode:
+
+```javascript
+// Add to generate-error-catalogue.mjs
+const checkMode = process.argv.includes('--check');
+
+// ... generate catalogue ...
+
+if (checkMode) {
+  const existing = fs.readFileSync('docs/error-catalogue.md', 'utf-8');
+  if (existing !== generated) {
+    console.error('ERROR: docs/error-catalogue.md is out of sync with docs/error-codes.json');
+    console.error('Run: npm run generate-error-catalogue');
+    process.exit(1);
+  }
+  console.log('✓ Error catalogue is in sync');
+} else {
+  fs.writeFileSync('docs/error-catalogue.md', generated);
+}
+```
+
+Add to Makefile:
+
+.PHONY: check-error-catalogue
+
+check-error-catalogue:
+	@echo "Checking error catalogue sync..."
+	node scripts/generate-error-catalogue.mjs --check
+
+---
+
+## #358 - README Quickstart Verification
+
+Update README.md quickstart section to reference current scripts:
+
+### Quick Start
+
+1. Clone and setup:
+   ```bash
+   git clone https://github.com/icentedward76-sketch/backend.git
+   cd backend
+   make setup
+   cargo build
+   ```
+
+2. For contract development, see docs/contract-builds.md:
+   ```bash
+   ./scripts/contracts.sh build
+   ./scripts/deploy-soroban.sh local
+   ```
+
+3. Run tests:
+   ```bash
+   make test
+   make test-integration
+   ```
+
+4. Check formatting and linting:
+   ```bash
+   make fmt-check
+   make lint
+   ```
+
+For complete documentation, see:
+- docs/contract-builds.md - Contract build workflow
+- docs/api-versioning-policy.md - API changes and OpenAPI
+
+---
+
+## #357 - Makefile Setup Target
+
+Add/update in Makefile:
+
+.PHONY: setup
+
+setup:
+	@echo "Setting up local development environment..."
+	@if [ ! -f .env ]; then \
+		echo "Creating .env from .env.example..."; \
+		cp .env.example .env; \
+		echo "✓ Created .env"; \
+		echo "⚠️  Review .env and update any secrets/configuration"; \
+	else \
+		echo ".env already exists, skipping..."; \
+	fi
+	@if [ ! -d .sqlx ]; then \
+		echo "ERROR: .sqlx directory not found"; \
+		echo "This directory contains SQLx offline query cache"; \
+		echo "It should be committed to the repository"; \
+		exit 1; \
+	else \
+		echo "✓ SQLx offline cache found"; \
+	fi
+	@echo "Setup complete!"
+	@echo "Next steps:"
+	@echo "  1. Update .env with your configuration"
+	@echo "  2. Run: cargo build"
+	@echo "  3. Run: cargo test"
+
+Document in README.md:
+
+## Local Development Setup
+
+```bash
+make setup     # Copies .env.example to .env, checks SQLx cache
+cargo build    # Build the project
+cargo test     # Run tests
+```
+
+The setup target:
+- Creates .env from .env.example if it doesn't exist
+- Verifies .sqlx offline cache is present
+- Does NOT overwrite an existing .env
+
