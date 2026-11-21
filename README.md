@@ -324,3 +324,6 @@ MIT © Zenith Protocol Contributors
 
 <!-- handsoff-issue-373 -->
 - #373: `docs/INDEX_AUDIT.md` references files that have since moved
+
+<!-- handsoff-issue-379 -->
+- #379: Settlement statement generation issues one query per position
