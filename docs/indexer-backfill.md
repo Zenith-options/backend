@@ -63,6 +63,23 @@ projection always moves forward. It pages through the events of a range
 the same projection step as the live indexer. A range that fails is reported
 in the result and the run continues: one bad range must not stop the repair.
 
+## Progress reporting
+
+A backfill can run for a long time, so `BackfillRunner::run` emits a periodic
+progress line while it works. The line is written to **stderr** so it never
+pollutes machine-readable output on stdout, and it reports the blocks
+processed so far, the current ledger height, and the elapsed time:
+
+```
+backfill progress: blocks=1200 height=4821000 elapsed=30.0s
+```
+
+A line is emitted every `ZENITH_INDEXER_PROGRESS_INTERVAL_MS` milliseconds
+(30 000 by default) and after every `ZENITH_INDEXER_PROGRESS_BLOCKS` blocks
+(1 000 by default), whichever comes first. Progress reporting is purely
+observational: it does not change the batching, ordering or projection of the
+replay, and it stops as soon as the run finishes.
+
 ## The retention limitation
 
 **Soroban RPC nodes only serve events for a bounded window of ledgers.** A
@@ -110,6 +127,7 @@ the reason when it is not.
    with the oldest gap.
 4. Replay the repairable ranges through `BackfillRunner`. The plan reports
    the ranges it will replay and the ranges it refuses to replay, with the
-   reason.
+   reason. Watch the `backfill progress:` lines on stderr to confirm the run
+   is advancing and to estimate how long it will take.
 5. Check `indexer_backfill_runs` for the outcome of every replay, and
    `indexer_ledger_gaps` for the gaps that are still open.
