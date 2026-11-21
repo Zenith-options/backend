@@ -319,3 +319,8 @@ rather than just assumed from reading the SQL.
 ## License
 
 MIT © Zenith Protocol Contributors
+
+## Handsoff notes
+
+<!-- handsoff-issue-373 -->
+- #373: `docs/INDEX_AUDIT.md` references files that have since moved
