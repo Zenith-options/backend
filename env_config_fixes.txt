@@ -1,0 +1,79 @@
+# Issues #368, #367, #366, #365 - Configuration Fixes
+
+## #368 - .env.example - Missing Variables
+# Add to .env.example:
+
+# Database Configuration
+DATABASE_URL=postgresql://user:password@localhost:5432/options_dev
+DATABASE_POOL_SIZE=10
+
+# Server Configuration
+SERVER_HOST=127.0.0.1
+SERVER_PORT=8080
+LOG_LEVEL=debug
+
+# API Configuration
+API_TIMEOUT_SECS=30
+API_MAX_CONNECTIONS=100
+
+# Feature Flags
+ENABLE_TESTNET=false
+ENABLE_ANALYTICS=true
+
+# Optional External Services
+SENTRY_DSN=https://example@sentry.io/123456
+REDIS_URL=redis://127.0.0.1:6379
+
+---
+
+## #367 - Makefile help - Add Missing Targets
+
+Add to help target recipe (maintain column alignment):
+
+	@echo "fmt                - Format all Rust code with cargo fmt"
+	@echo "fmt-check          - Check formatting without modifying"
+	@echo "lint               - Run clippy linter"
+	@echo "test-unit          - Run unit tests"
+	@echo "test-integration   - Run integration tests"
+	@echo "coverage           - Generate test coverage report"
+	@echo "bench              - Run benchmarks"
+	@echo "docs               - Build Rust documentation"
+
+---
+
+## #366 - Makefile fmt-check Target
+
+Add to Makefile:
+
+.PHONY: fmt fmt-check
+
+fmt:
+	cargo fmt --all
+
+fmt-check:
+	cargo fmt --all -- --check
+
+Add to README.md Contributing section:
+
+### Code Formatting
+
+Run `make fmt` to auto-format all Rust code according to rustfmt.toml.
+Run `make fmt-check` locally before committing to catch formatting drift.
+CI will reject commits with formatting violations.
+
+---
+
+## #365 - nextest.toml Configuration
+
+Update .config/nextest.toml:
+
+[profile.default]
+# Existing settings
+timeout = "60s"
+
+# ADD: Slow timeout reporting
+slow-timeout = { period = "30s", terminate-after = "120s" }
+
+# This will print the test name when it's close to timing out
+# Format: "test name ran for 30s and will be terminated at 120s"
+
