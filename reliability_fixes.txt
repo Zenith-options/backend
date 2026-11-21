@@ -1,0 +1,194 @@
+# Issues #356, #355, #354, #353 - Backend Reliability Fixes
+
+## #356 - Helm PodDisruptionBudget for Worker
+
+Add to deploy/helm/zenith-backend/templates/worker-pdb.yaml:
+
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "zenith-backend.fullname" . }}-worker-pdb
+  labels:
+    {{- include "zenith-backend.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.worker.pdb.minAvailable | default 1 }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "zenith-backend.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: worker
+
+Add to values.yaml:
+
+worker:
+  pdb:
+    minAvailable: 1  # Ensure at least 1 worker pod survives node drains
+
+---
+
+## #355 - Restore Script Error Handling
+
+Update scripts/restore.sh:
+
+#!/bin/bash
+set -euo pipefail
+
+# ... existing setup ...
+
+RESTORE_LOG="/tmp/restore-$$.log"
+trap "rm -f $RESTORE_LOG" EXIT
+
+echo "Starting restore from $BACKUP_FILE..."
+
+# Run pg_restore with error handling
+if ! pg_restore \
+    --host "$DB_HOST" \
+    --port "$DB_PORT" \
+    --username "$DB_USER" \
+    --dbname "$DB_NAME" \
+    --no-owner \
+    --if-exists \
+    "$BACKUP_FILE" \
+    2>&1 | tee "$RESTORE_LOG"; then
+
+  RESTORE_EXIT=$?
+  echo "ERROR: pg_restore failed with exit code $RESTORE_EXIT" >&2
+  echo "Last 20 lines of restore log:" >&2
+  tail -20 "$RESTORE_LOG" >&2
+  exit $RESTORE_EXIT
+fi
+
+echo "Restore completed successfully"
+exit 0
+
+Update docs/runbooks/restore.md:
+
+## Restore Process
+
+The restore script will:
+1. Check pg_restore exit status
+2. On failure, print the last 20 lines of the restore log
+3. Exit with non-zero status so monitoring catches the failure
+
+If restore fails:
+- Check the printed logs for the specific error
+- Verify backup file integrity: pg_restore --list "$BACKUP_FILE"
+- Do NOT proceed with verification if restore failed
+
+---
+
+## #354 - Preserve Contract Error Codes
+
+Update src/chain/client.rs:
+
+use soroban_sdk::ScError;
+
+pub struct ContractError {
+    pub code: u32,
+    pub message: String,
+    pub diagnostic_events: Vec<String>,
+}
+
+pub async fn invoke_contract(
+    env: &Env,
+    contract: &str,
+    method: &str,
+) -> Result<Response, ContractError> {
+    match invoke_internal(...).await {
+        Ok(result) => Ok(result),
+        Err(e) => {
+            // Extract error code from ScError
+            let code = match &e {
+                soroban_sdk::Error::InvokeHostFunction(err) => {
+                    err.error_code()
+                }
+                _ => 500,
+            };
+
+            // Log diagnostic events at debug level
+            debug!("Contract invocation failed: {:?}", e);
+
+            Err(ContractError {
+                code,
+                message: safe_error_message(&e),
+                diagnostic_events: collect_events(&e),
+            })
+        }
+    }
+}
+
+fn safe_error_message(e: &Error) -> String {
+    // Don't leak internal host function names
+    match e {
+        soroban_sdk::Error::InvokeHostFunction(_) => {
+            "Contract invocation failed".to_string()
+        }
+        _ => format!("Error: {}", e),
+    }
+}
+
+---
+
+## #353 - Keeper Bounty Payout Failure Recovery
+
+Update src/keeper/bounty.rs:
+
+#[derive(Debug, Clone)]
+pub enum BountyState {
+    Pending,
+    Processing,
+    Paid,
+    Failed { reason: String },
+}
+
+pub async fn process_bounty_payout(bounty: &BountyRecord) -> Result<(), BountyError> {
+    let result = execute_payout_transaction(bounty).await;
+
+    match result {
+        Ok(_) => {
+            // Mark bounty as paid
+            update_bounty_state(bounty.id, BountyState::Paid).await?;
+            Ok(())
+        }
+        Err(e) if is_retryable(&e) => {
+            // Store error and schedule retry with backoff
+            update_bounty_state(
+                bounty.id,
+                BountyState::Failed {
+                    reason: format!("Retryable: {}", e)
+                }
+            ).await?;
+
+            schedule_retry(bounty.id, exponential_backoff(bounty.retry_count))?;
+            Ok(())
+        }
+        Err(e) if !is_retryable(&e) => {
+            // Mark as permanently failed and alert
+            update_bounty_state(
+                bounty.id,
+                BountyState::Failed {
+                    reason: format!("Non-retryable: {}", e)
+                }
+            ).await?;
+
+            alert_ops(&format!("Bounty {} permanently failed: {}", bounty.id, e))?;
+            Err(BountyError::Permanent(e))
+        }
+    }
+}
+
+fn is_retryable(err: &BountyError) -> bool {
+    matches!(err,
+        BountyError::NetworkTimeout |
+        BountyError::Transient(_)
+    )
+}
+
+Update docs/keeper-bounties.md State Machine:
+
+Pending -> Processing -> Paid
+              |
+              +-> Failed (retryable) -> Pending (with backoff)
+              |
+              +-> Failed (non-retryable) -> [ALERT OPS]
+
