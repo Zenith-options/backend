@@ -1,4 +1,11 @@
 {
   "schema_version": 1,
-  "contracts": []
+  "contracts": [],
+  "hash_algorithm": "sha256",
+  "hash_inputs": [
+    "Cargo.toml",
+    "src/**"
+  ],
+  "force_env": "FORCE",
+  "force_flag": "--force"
 }

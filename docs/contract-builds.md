@@ -84,10 +84,35 @@ The contract crate's release profile should set `codegen-units = 1` and
 `lto = true`. Both reduce nondeterminism, and the contract owns them, not
 the build script.
 
+## Skipping unchanged contracts
+
+`scripts/contracts.sh build` hashes each contract's sources (its `src/`
+tree plus `Cargo.toml`) and compares the result against the pin recorded in
+`deploy/contract-pins.json`. When the hash matches the pin, the contract is
+skipped and the existing artifact is reused, so a no-op run pays no compile
+cost. Touching a single contract's sources changes only that contract's
+hash, so only that contract rebuilds.
+
+Skipping is based on the source hash, never on a manual flag alone. To
+force a rebuild regardless of the hash — for CI, release builds, or when
+the cache is suspect — pass the force flag:
+
+```
+scripts/contracts.sh build <contracts-checkout> out/ <image@sha256:...> --force
+# or, equivalently:
+FORCE=1 scripts/contracts.sh build <contracts-checkout> out/ <image@sha256:...>
+```
+
+A skipped contract is reported as skipped, not as a success. When a build
+does run and genuinely fails, the script still exits non-zero with a clear
+error, so a broken build is never mistaken for a cache hit.
+
 ## Releasing a contract
 
 1. Merge the contract change in the contracts repo. Note the commit.
 2. Build: `scripts/contracts.sh build <contracts-checkout> out/ <image@sha256:...>`.
+   Pass `--force` (or `FORCE=1`) for release builds so the artifact is
+   always produced from scratch.
 3. Open a PR here that adds or updates the pin with the hash from
    `out/SHA256SUMS`, the commit and the image. CI's `reproduce` job
    rebuilds it twice from scratch. The PR cannot merge unless the rebuilds

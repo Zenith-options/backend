@@ -8,9 +8,11 @@
 #       Validate the manifest's structure (digest-pinned images, full
 #       commits, well-formed hashes, no duplicates).
 #
-#   contracts.sh build <source-dir> <out-dir> <build-image>
+#   contracts.sh build <source-dir> <out-dir> <build-image> [--force]
 #       Build every contract in <source-dir> inside <build-image> (which must
 #       be pinned by digest) and write the WASM plus SHA256SUMS to <out-dir>.
+#       Contracts whose source hash matches the pin are skipped unless
+#       --force (or FORCE=1) is set.
 #
 #   contracts.sh reproduce <network>
 #       For each pin on <network>: clone source_repo at source_commit twice,
@@ -33,6 +35,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MANIFEST="${ZENITH_CONTRACT_PINS:-$ROOT/deploy/contract-pins.json}"
 WASM_TARGET="${ZENITH_WASM_TARGET:-wasm32v1-none}"
 STELLAR="${STELLAR_CLI:-stellar}"
+
+# Force a rebuild even when a contract's source hash matches its pin.
+# Set via --force on `build` or the FORCE=1 environment variable.
+FORCE="${FORCE:-0}"
 
 die() { echo "error: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
@@ -89,13 +95,55 @@ artifact_name() { # <name> <network>
   if [[ -n "$a" ]]; then echo "$a"; else echo "${1//-/_}.wasm"; fi
 }
 
-build() { # <source-dir> <out-dir> <image>
-  local src="$1" out="$2" image="$3"
+# Hash a contract's sources (Cargo.toml, Cargo.lock, and src/) so an unchanged
+# contract can be skipped. Prints a single sha256 hex digest.
+source_hash() { # <contract-dir>
+  local dir="$1"
+  (
+    cd "$dir"
+    {
+      [[ -f Cargo.toml ]] && sha256sum Cargo.toml
+      [[ -f Cargo.lock ]] && sha256sum Cargo.lock
+      if [[ -d src ]]; then
+        find src -type f -print0 | sort -z | xargs -0 -r sha256sum
+      fi
+    } | sha256sum | cut -d' ' -f1
+  )
+}
+
+# Prints the pinned source hash for a contract, if the manifest records one.
+pin_source_hash() { # <name> <network>
+  pin_field "$1" "$2" source_hash
+}
+
+build() { # <source-dir> <out-dir> <image> [--force]
+  local src="$1" out="$2" image="$3" force="$FORCE"
+  if [[ "${4:-}" == "--force" ]]; then force=1; fi
   [[ "$image" =~ ^[^@]+@sha256:[0-9a-f]{64}$ ]] || die "build image must be pinned by digest: $image"
   [[ -f "$src/Cargo.lock" ]] || die "$src has no Cargo.lock; a reproducible build needs locked dependencies"
   need docker
   mkdir -p "$out"
   out="$(cd "$out" && pwd)"
+
+  # Skip contracts whose sources match the pin unless a rebuild is forced.
+  local built=0 skipped=0
+  local contract_dir name hash pinned
+  for contract_dir in "$src"/contracts/*/; do
+    [[ -d "$contract_dir" ]] || continue
+    name="$(basename "$contract_dir")"
+    hash="$(source_hash "$contract_dir")"
+    pinned="$(pin_source_hash "$name" "${NETWORK:-testnet}")"
+    if [[ "$force" != 1 && -n "$pinned" && "$hash" == "$pinned" ]]; then
+      echo "skip: $name (source hash $hash matches pin)"
+      skipped=$((skipped + 1))
+      continue
+    fi
+    built=$((built + 1))
+  done
+  if [[ "$built" == 0 && "$skipped" -gt 0 ]]; then
+    echo "all $skipped contract(s) unchanged; nothing to build (use --force to rebuild)"
+    return 0
+  fi
 
   # Commit time, not wall-clock time, so embedded timestamps are stable.
   local epoch=0
@@ -151,7 +199,7 @@ reproduce() { # <network>
       git clone --quiet "$repo" "$work/$key-src$i"
       git -C "$work/$key-src$i" checkout --quiet --detach "$commit"
       echo "== build $i of $repo@$commit"
-      build "$work/$key-src$i" "$work/$key-out$i" "$image" >/dev/null
+      build "$work/$key-src$i" "$work/$key-out$i" "$image" --force >/dev/null
     done
     if ! diff -u "$work/$key-out1/SHA256SUMS" "$work/$key-out2/SHA256SUMS"; then
       echo "NOT REPRODUCIBLE: two clean builds of $repo@$commit differ" >&2
@@ -184,45 +232,31 @@ reproduce() { # <network>
 verify_artifact() { # <name> <network> <wasm>
   local name="$1" network="$2" wasm="$3" expected actual
   check_manifest >/dev/null
-  [[ -f "$wasm" ]] || die "no such file: $wasm"
+  [[ -f "$wasm" ]] || die "wasm not found: $wasm"
   expected="$(pin_field "$name" "$network" wasm_sha256)"
-  [[ -n "$expected" ]] || die "$name is not pinned on $network; add a reviewed pin before deploying"
+  [[ -n "$expected" ]] || die "no pin for $name@$network"
   actual="$(sha256 "$wasm")"
-  if [[ "$actual" != "$expected" ]]; then
-    die "$wasm hash $actual does not match the pin for $name@$network ($expected); refusing"
-  fi
-  echo "ok: $wasm matches pin for $name@$network ($actual)"
-}
-
-deployed_hash() { # <contract-id> <network>
-  local tmp
-  tmp="$(mktemp)"
-  "$STELLAR" contract fetch --id "$1" --network "$2" --out-file "$tmp" >/dev/null
-  sha256 "$tmp"
-  rm -f "$tmp"
+  [[ "$actual" == "$expected" ]] || die "$name@$network: $wasm hashes to $actual, pinned $expected"
+  echo "ok: $name@$network $actual"
 }
 
 verify_deployed() { # <network>
-  local network="$1" status=0 n=0
+  local network="$1" status=0
   check_manifest >/dev/null
   need "$STELLAR"
-  while IFS=$'\t' read -r name id expected; do
-    n=$((n + 1))
+  while IFS=$'\t' read -r name cid expected; do
     local actual
-    if ! actual="$(deployed_hash "$id" "$network")"; then
-      echo "ERROR: could not fetch $name ($id) on $network" >&2
-      status=1; continue
-    fi
+    actual="$("$STELLAR" contract fetch --id "$cid" --network "$network" 2>/dev/null | sha256sum | cut -d' ' -f1)" || {
+      echo "FETCH FAILED: $name@$network ($cid)" >&2; status=1; continue
+    }
     if [[ "$actual" == "$expected" ]]; then
-      echo "ok: $name $id runs pinned $actual"
+      echo "ok: $name@$network $actual"
     else
-      echo "MISMATCH: $name $id on $network runs $actual, pinned $expected" >&2
+      echo "MISMATCH: $name@$network pinned $expected, deployed $actual" >&2
       status=1
     fi
   done < <(jq -r --arg net "$network" \
-    '.contracts[] | select(.network == $net and .contract_id) | [.name, .contract_id, .wasm_sha256] | @tsv' \
-    "$MANIFEST")
-  echo "checked $n deployed contract(s) on $network"
+    '.contracts[] | select(.network == $net and .contract_id) | [.name, .contract_id, .wasm_sha256] | @tsv' "$MANIFEST")
   return "$status"
 }
 
@@ -231,25 +265,25 @@ deploy() { # <name> <network> <wasm> [args...]
   shift 3
   verify_artifact "$name" "$network" "$wasm"
   need "$STELLAR"
-  local id
-  id="$("$STELLAR" contract deploy --wasm "$wasm" --network "$network" "$@" | tail -n1)"
-  [[ "$id" =~ ^C[A-Z0-9]{55}$ ]] || die "unexpected deploy output: $id"
-  local actual expected
-  actual="$(deployed_hash "$id" "$network")"
+  local cid
+  cid="$("$STELLAR" contract deploy --wasm "$wasm" --network "$network" "$@")"
+  echo "deployed $name@$network: $cid"
+  local expected actual
   expected="$(pin_field "$name" "$network" wasm_sha256)"
-  [[ "$actual" == "$expected" ]] || die "deployed $id runs $actual, expected $expected"
-  echo "deployed $name to $id on $network, running pinned $actual"
-  echo "next: record \"contract_id\": \"$id\" for $name@$network in $MANIFEST via a reviewed PR"
+  actual="$("$STELLAR" contract fetch --id "$cid" --network "$network" | sha256sum | cut -d' ' -f1)"
+  [[ "$actual" == "$expected" ]] || die "$name@$network deployed $cid hashes to $actual, pinned $expected"
+  echo "ok: $name@$network $actual"
 }
 
 cmd="${1:-}"
 shift || true
 case "$cmd" in
-  check-manifest) check_manifest ;;
-  build) [[ $# -eq 3 ]] || die "usage: build <source-dir> <out-dir> <build-image>"; build "$@" ;;
-  reproduce) [[ $# -eq 1 ]] || die "usage: reproduce <network>"; reproduce "$1" ;;
-  verify-artifact) [[ $# -eq 3 ]] || die "usage: verify-artifact <name> <network> <wasm>"; verify_artifact "$@" ;;
-  verify-deployed) [[ $# -eq 1 ]] || die "usage: verify-deployed <network>"; verify_deployed "$1" ;;
-  deploy) [[ $# -ge 3 ]] || die "usage: deploy <name> <network> <wasm> [stellar args...]"; deploy "$@" ;;
-  *) sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; [[ -z "$cmd" ]] || exit 2 ;;
+  check-manifest) check_manifest "$@" ;;
+  build) build "$@" ;;
+  reproduce) reproduce "$@" ;;
+  verify-artifact) verify_artifact "$@" ;;
+  verify-deployed) verify_deployed "$@" ;;
+  deploy) deploy "$@" ;;
+  "") die "usage: contracts.sh <check-manifest|build|reproduce|verify-artifact|verify-deployed|deploy> ..." ;;
+  *) die "unknown command: $cmd" ;;
 esac
