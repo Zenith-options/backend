@@ -7,6 +7,11 @@ settlement also needs historical records retained long-term — but not hot.
 cold archives, and never deletes a row it hasn't durably archived first
 (unless the policy explicitly opts out of archiving).
 
+> **Authoritative source.** The retention periods below are the defaults
+> defined in `default_policies()` in `src/retention.rs`. That code is the
+> single source of truth; this document and `docs/compliance.md` must match
+> it. If they ever disagree, the config in code wins.
+
 ## Table classes
 
 | Class | Tables | Rule |

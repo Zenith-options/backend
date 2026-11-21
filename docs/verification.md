@@ -78,18 +78,20 @@ which point the gap closes with no change to the property list.
 
 ## How to run
 
+Kani is **not** run in CI. The proofs are a manual verification step: run them
+locally before touching the fixed-point prototypes or their harnesses.
+
 ```bash
 # Install (once): https://model-checking.github.io/kani/install-guide.html
 cargo kani
 ```
 
-CI runs the same command via `.github/workflows/kani.yml` on every PR and
-nightly. A normal `cargo test` / `cargo clippy` never compiles the harnesses:
-the module is gated behind `#[cfg(kani)]`, so the tests remain fast.
+A normal `cargo test` / `cargo clippy` never compiles the harnesses: the
+module is gated behind `#[cfg(kani)]`, so the tests remain fast.
 
 ## Expected output
 
-Each harness reports `VERIFICATION:- SUCCESSFUL`; the job fails if any harness
+Each harness reports `VERIFICATION:- SUCCESSFUL`; the run fails if any harness
 finds a counterexample. A minimal run looks like:
 
 ```

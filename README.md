@@ -319,3 +319,8 @@ rather than just assumed from reading the SQL.
 ## License
 
 MIT © Zenith Protocol Contributors
+
+## Handsoff notes
+
+<!-- handsoff-issue-408 -->
+- #408: Error responses carry no machine-readable code for assistive tooling
