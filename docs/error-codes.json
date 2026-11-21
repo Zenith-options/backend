@@ -5,6 +5,7 @@
   {"code":"INSUFFICIENT_BALANCE","http_status":422,"description":"The account balance or available collateral is insufficient."},
   {"code":"INTERNAL_ERROR","http_status":500,"description":"Unexpected server-side failure."},
   {"code":"INVALID_CREDENTIALS","http_status":[400,401],"description":"A supplied wallet address or signature credential is invalid."},
+  {"code":"INVALID_PAGINATION","http_status":400,"description":"A pagination parameter (limit or offset) is non-integer or out of the accepted range."},
   {"code":"INVALID_REQUEST","http_status":400,"description":"The request is malformed or has invalid fields."},
   {"code":"NOT_FOUND","http_status":404,"description":"The requested resource does not exist or is not visible to this caller."},
   {"code":"RATE_LIMITED","http_status":429,"description":"The caller exceeded the configured request rate."},
