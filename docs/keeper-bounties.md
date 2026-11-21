@@ -14,3 +14,13 @@ The current chain submission boundary does not construct or sign Stellar
 payments. Accordingly, this change does not mark any bounty paid or treat an
 unverified transaction hash as payment. A chain-backed payout executor must
 confirm a transfer before the ledger is transitioned to `paid`.
+
+## Scan logging
+
+Each bounty scan emits exactly one info-level summary line when it finishes,
+including the number of eligible bounties found (`found`) and the scan
+duration in milliseconds (`duration_ms`). The summary is emitted even when a
+scan finds zero eligible bounties, so operators can distinguish a quiet
+market from a stalled worker. Per-bounty details are logged at debug level
+only and are never emitted at info level. Scan logging does not affect payout
+or accrual logic.
