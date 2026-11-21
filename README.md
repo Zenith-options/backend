@@ -319,3 +319,11 @@ rather than just assumed from reading the SQL.
 ## License
 
 MIT © Zenith Protocol Contributors
+
+## Handsoff notes
+
+<!-- handsoff-issue-411 -->
+- #411: Health and readiness responses are indistinguishable to a screen reader
+
+<!-- handsoff-issue-412 -->
+- #412: Validation errors report only the first failing field
