@@ -5,6 +5,12 @@
 //! cargo bench --bench iv
 //! ```
 //!
+//! Each case reports the wall-clock time per single `implied_vol` call (one
+//! solve), grouped under `implied_vol/<case-label>`. Criterion prints the
+//! median estimate with a confidence interval and a change vs. the previous
+//! run; lower time per solve is better. Throughput is set to one element, so
+//! the reported figure is the per-solve latency rather than a batch rate.
+//!
 //! The benchmark exercises the safeguarded Newton/Brent solver across a grid
 //! of moneyness, expiry and volatility values that cover the acceptance
 //! criteria of issue #21 (vol in [0.01, 10], T in [1 hour, 3 years],
