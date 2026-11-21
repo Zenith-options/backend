@@ -26,6 +26,14 @@ autobins = false
 name = "zenith-backend"
 path = "src/main.rs"
 
+# Implied-volatility benchmark. Run with `cargo bench --bench iv`; the
+# reported metric is the per-iteration time to price an option via the
+# implied-vol solver (lower is better). See benches/iv.rs for details.
+[[bench]]
+name = "iv"
+path = "benches/iv.rs"
+harness = false
+
 [dependencies]
 axum = { version = "0.7", features = ["ws"] }
 anyhow = "1"

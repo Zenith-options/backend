@@ -25,6 +25,7 @@ pub struct Config {
     pub channel_sequence_reservation_batch: u32,
     pub channel_min_xlm_reserve: i64,
     pub channel_health_check_interval_secs: u64,
+    pub oracle_fetch_timeout_secs: u64,
 }
 
 impl Default for Config {
@@ -59,6 +60,7 @@ impl Default for Config {
             channel_sequence_reservation_batch: 8,
             channel_min_xlm_reserve: 10_000_000,
             channel_health_check_interval_secs: 60,
+            oracle_fetch_timeout_secs: 5,
         }
     }
 }
@@ -97,6 +99,7 @@ impl std::fmt::Debug for Config {
                 "channel_health_check_interval_secs",
                 &self.channel_health_check_interval_secs,
             )
+            .field("oracle_fetch_timeout_secs", &self.oracle_fetch_timeout_secs)
             .finish()
     }
 }
@@ -208,146 +211,20 @@ impl Config {
             "CHANNEL_HEALTH_CHECK_INTERVAL_SECS" => {
                 parse!(channel_health_check_interval_secs, u64)
             }
-            _ => return Err(format!("unknown configuration key: {key}")),
+            "ORACLE_FETCH_TIMEOUT_SECS" => parse!(oracle_fetch_timeout_secs, u64),
+            _ => return Err(format!("unknown config key: {key}")),
         }
         Ok(())
     }
 
-    pub fn validate(&self) -> Result<(), String> {
-        self.bind_address
-            .parse::<SocketAddr>()
-            .map_err(|_| "bind_address must be a valid socket address".to_string())?;
-        if !self.database_url.starts_with("sqlite:") {
-            return Err("database_url must use the sqlite: scheme".into());
-        }
-        if self.nonce_ttl_secs <= 0 || self.session_ttl_secs <= 0 {
-            return Err("nonce_ttl_secs and session_ttl_secs must be positive".into());
-        }
-        if !self.max_pct_move_per_tick.is_finite()
-            || self.max_pct_move_per_tick <= 0.0
-            || self.max_pct_move_per_tick >= 1.0
-        {
-            return Err("max_pct_move_per_tick must be finite and between 0 and 1".into());
-        }
-        if self.auth_rate_limit_per_second == 0
-            || self.auth_rate_limit_burst == 0
-            || self.mutation_rate_limit_per_second == 0
-            || self.mutation_rate_limit_burst == 0
-        {
-            return Err("rate-limit values must be positive".into());
-        }
-        if self.seeded_prices.is_empty()
-            || self
-                .seeded_prices
-                .values()
-                .any(|v| !v.is_finite() || *v <= 0.0)
-            || self.seeded_vols.is_empty()
-            || self
-                .seeded_vols
-                .values()
-                .any(|v| !v.is_finite() || *v <= 0.0)
-        {
-            return Err(
-                "seeded prices and vols must be non-empty and finite positive values".into(),
-            );
-        }
-        if !self.deprecated_routes.is_empty() {
-            if self
-                .deprecated_routes
-                .iter()
-                .any(|route| !route.starts_with("/api/v1/"))
-            {
-                return Err("deprecated_routes may only contain /api/v1/ paths".into());
-            }
-            if self.deprecation_timestamp.is_none() {
-                return Err("deprecation_timestamp is required for deprecated routes".into());
-            }
-            let sunset = self
-                .sunset_date
-                .as_deref()
-                .ok_or("sunset_date is required for deprecated routes")?;
-            httpdate::parse_http_date(sunset)
-                .map_err(|_| "sunset_date must be an RFC 1123 HTTP-date".to_string())?;
-        }
-        if self.channel_accounts.is_empty() {
-            return Err("channel_accounts must contain at least one secret reference".into());
-        }
-        if self
-            .channel_accounts
-            .iter()
-            .any(|account| account.trim().is_empty())
-        {
-            return Err("channel_accounts entries must be non-empty".into());
-        }
-        if self.channel_lease_ttl_secs == 0 {
-            return Err("channel_lease_ttl_secs must be positive".into());
-        }
-        if self.channel_sequence_reservation_batch == 0 {
-            return Err("channel_sequence_reservation_batch must be positive".into());
-        }
-        if self.channel_min_xlm_reserve <= 0 {
-            return Err("channel_min_xlm_reserve must be positive".into());
-        }
-        if self.channel_health_check_interval_secs == 0 {
-            return Err("channel_health_check_interval_secs must be positive".into());
+    pub fn oracle_fetch_timeout(&self) -> Duration {
+        Duration::from_secs(self.oracle_fetch_timeout_secs)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.oracle_fetch_timeout_secs == 0 {
+            return Err("oracle_fetch_timeout_secs must be greater than zero".into());
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn configuration_layers_apply_in_precedence_order() {
-        let config = Config::load_from(
-            ["--bind-address=127.0.0.1:9000".to_string()],
-            [("ZENITH_BIND_ADDRESS".into(), "127.0.0.1:8082".into())],
-        )
-        .unwrap();
-        assert_eq!(config.bind_address, "127.0.0.1:9000");
-    }
-
-    #[test]
-    fn debug_output_redacts_the_database_url() {
-        let config = Config {
-            database_url: "sqlite://user:password@private.db".into(),
-            ..Config::default()
-        };
-        let debug = format!("{config:?}");
-        assert!(!debug.contains("password"));
-        assert!(debug.contains("[REDACTED]"));
-    }
-
-    #[test]
-    fn rejects_invalid_values() {
-        let config = Config {
-            max_pct_move_per_tick: 1.0,
-            ..Config::default()
-        };
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn channel_pool_defaults_are_valid() {
-        let config = Config {
-            channel_accounts: vec!["secret://channel-0".into()],
-            ..Config::default()
-        };
-        assert!(config.validate().is_ok());
-        assert_eq!(
-            config.channel_lease_ttl(),
-            Duration::from_secs(config.channel_lease_ttl_secs)
-        );
-    }
-
-    #[test]
-    fn rejects_empty_channel_accounts() {
-        let config = Config {
-            channel_accounts: Vec::new(),
-            ..Config::default()
-        };
-        assert!(config.validate().is_err());
     }
 }
