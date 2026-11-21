@@ -12,6 +12,13 @@ assignments, transfers, cash movements, and fees with their chain transaction
 hashes. The schema and both renderers avoid request-time timestamps, so the
 same stored rows and query produce byte-identical output.
 
+When statement generation fails, the endpoint responds with the standard API
+error envelope instead of an empty body. The response carries the
+machine-readable code `STATEMENT_GENERATION_FAILED` (see
+`docs/error-codes.json`) so clients can distinguish a generation failure from
+a missing statement. The success path and the generated file format are
+unchanged.
+
 The current repository has no configured document-signing key or chain-event
 projection writer for this SQLite service. This endpoint therefore emits
 deterministic, unsigned reports; it must not be represented as a signed
