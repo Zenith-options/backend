@@ -21,5 +21,6 @@
   {"code":"AUTH_FAILURE","http_status":403,"description":"Soroban authentication requirements were not satisfied."},
   {"code":"RPC_METHOD_UNSUPPORTED","http_status":503,"description":"The Soroban RPC endpoint does not support the requested method.","rpc_code":-32601},
   {"code":"RPC_UNAVAILABLE","http_status":503,"description":"The Soroban RPC endpoint could not complete the request.","rpc_code":-32603},
+  {"code":"ORACLE_FETCH_FAILED","http_status":503,"description":"Every configured oracle provider failed to return a price; the error lists each provider and its failure reason."},
   {"code":"UNKNOWN","http_status":500,"description":"An unrecognized contract, host, or RPC failure occurred."}
 ]
