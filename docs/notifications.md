@@ -64,6 +64,23 @@ to non-critical email and push. Notifications over the cap are recorded as
   its outcome (`delivered`, `transient_failure`, `permanent_failure`,
   `timeout`).
 
+## Delivery metrics
+
+The dispatcher emits Prometheus metrics so failure rates and slow deliveries
+can be alerted on without reading logs. They are registered at startup and
+served on the existing metrics endpoint.
+
+| Metric | Type | Labels |
+|---|---|---|
+| `webhook_delivery_attempts_total` | counter | `event_type`, `outcome` |
+| `webhook_delivery_successes_total` | counter | `event_type` |
+| `webhook_delivery_failures_total` | counter | `event_type`, `outcome` |
+| `webhook_delivery_latency_seconds` | histogram | `event_type`, `outcome` |
+
+`outcome` is one of `delivered`, `transient_failure`, `permanent_failure`,
+`timeout`. Metrics are labelled by event type and outcome only — never by
+endpoint URL, to keep cardinality bounded.
+
 ## Content safety
 
 Templates can only use `TemplateData`. That is a closed set of typed fields:
