@@ -324,3 +324,6 @@ MIT © Zenith Protocol Contributors
 
 <!-- handsoff-issue-397 -->
 - #397: `docs/chain-costs.md` fee table no longer matches the fee constants in the code
+
+<!-- handsoff-issue-400 -->
+- #400: `docs/session-keys.md` documents a key format the validator rejects
