@@ -112,6 +112,19 @@ pub fn normalize_limit(limit: Option<u32>) -> u32 {
     }
 }
 
+/// Validate a caller-supplied `offset`.
+///
+/// A negative offset is a client bug, so it is rejected with a 400 validation
+/// error rather than silently clamped to zero (which would hand the caller the
+/// first page). Non-integer values are rejected the same way during parsing.
+pub fn normalize_offset(offset: Option<i64>) -> Result<i64, ApiError> {
+    match offset {
+        None => Ok(0),
+        Some(n) if n < 0 => Err(ApiError::bad_request("offset must not be negative")),
+        Some(n) => Ok(n),
+    }
+}
+
 /// Build a stable fingerprint of the active filter set.
 ///
 /// The fingerprint is bound into the cursor signature so a cursor minted for
@@ -200,5 +213,18 @@ mod tests {
         assert_eq!(normalize_limit(Some(0)), DEFAULT_LIST_LIMIT);
         assert_eq!(normalize_limit(Some(10)), 10);
         assert_eq!(normalize_limit(Some(MAX_LIST_LIMIT + 1)), MAX_LIST_LIMIT);
+    }
+
+    #[test]
+    fn accepts_zero_and_positive_offsets() {
+        assert_eq!(normalize_offset(None).unwrap(), 0);
+        assert_eq!(normalize_offset(Some(0)).unwrap(), 0);
+        assert_eq!(normalize_offset(Some(50)).unwrap(), 50);
+    }
+
+    #[test]
+    fn rejects_negative_offsets() {
+        let err = normalize_offset(Some(-1)).unwrap_err();
+        assert_eq!(err.status(), 400);
     }
 }

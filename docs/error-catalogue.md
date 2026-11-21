@@ -26,4 +26,5 @@ This file is generated from `docs/error-codes.json`. Error codes are stable API 
 | `AUTH_FAILURE` | 403 | Soroban authentication requirements were not satisfied. |
 | `RPC_METHOD_UNSUPPORTED` | 503 | The Soroban RPC endpoint does not support the requested method. |
 | `RPC_UNAVAILABLE` | 503 | The Soroban RPC endpoint could not complete the request. |
+| `ORACLE_FETCH_FAILED` | 503 | Every configured oracle provider failed to return a price; the error lists each provider and its underlying failure reason. |
 | `UNKNOWN` | 500 | An unrecognized contract, host, or RPC failure occurred. |

@@ -319,3 +319,8 @@ rather than just assumed from reading the SQL.
 ## License
 
 MIT © Zenith Protocol Contributors
+
+## Handsoff notes
+
+<!-- handsoff-issue-431 -->
+- #431: Settlement saga treats a missing position row as a successful step

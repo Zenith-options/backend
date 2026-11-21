@@ -31,6 +31,17 @@ struct HistoryQuery {
 const DEFAULT_LIST_LIMIT: i64 = 50;
 const MAX_LIST_LIMIT: i64 = 200;
 
+/// Replicates the offset validation from the list_positions/history handlers.
+/// Negative offsets are rejected with a validation error (HTTP 400), matching
+/// how non-integer values are handled; they are no longer clamped to zero.
+fn validate_offset(offset: Option<i64>) -> Result<i64, &'static str> {
+    match offset {
+        Some(o) if o < 0 => Err("offset must be >= 0"),
+        Some(o) => Ok(o),
+        None => Ok(0),
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     let Ok(s) = std::str::from_utf8(data) else {
         return;
@@ -40,25 +51,34 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(q) = serde_urlencoded::from_str::<ListPositionsQuery>(s) {
         // Replicate the clamping logic from list_positions handler
         let limit = q.limit.unwrap_or(DEFAULT_LIST_LIMIT).clamp(1, MAX_LIST_LIMIT);
-        let offset = q.offset.unwrap_or(0).max(0);
 
         // Clamped limit must always be in [1, MAX_LIST_LIMIT]
         assert!(
             limit >= 1 && limit <= MAX_LIST_LIMIT,
             "limit={limit} out of bounds after clamp"
         );
-        // Offset must always be non-negative after max(0)
-        assert!(
-            offset >= 0,
-            "offset={offset} should be >= 0 after max(0)"
-        );
+
+        // Negative offsets must be rejected, not clamped.
+        match validate_offset(q.offset) {
+            Ok(offset) => assert!(
+                offset >= 0,
+                "offset={offset} should be >= 0 after validation"
+            ),
+            Err(_) => assert!(
+                q.offset.map(|o| o < 0).unwrap_or(false),
+                "offset rejected but was not negative"
+            ),
+        }
     }
 
     // 2. HistoryQuery — same treatment
     if let Ok(q) = serde_urlencoded::from_str::<HistoryQuery>(s) {
         let limit = q.limit.unwrap_or(DEFAULT_LIST_LIMIT).clamp(1, MAX_LIST_LIMIT);
-        let offset = q.offset.unwrap_or(0).max(0);
         assert!(limit >= 1 && limit <= MAX_LIST_LIMIT);
-        assert!(offset >= 0);
+
+        match validate_offset(q.offset) {
+            Ok(offset) => assert!(offset >= 0),
+            Err(_) => assert!(q.offset.map(|o| o < 0).unwrap_or(false)),
+        }
     }
 });
