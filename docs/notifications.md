@@ -82,5 +82,33 @@ stored in the outbox.
 | email | `HttpEmailProvider` | `DELIVERY_EMAIL_API_URL`, `DELIVERY_EMAIL_API_TOKEN`, `DELIVERY_EMAIL_FROM` |
 | push | `HttpPushProvider` | `NOTIFY_PUSH_GATEWAY_URL`, `NOTIFY_PUSH_GATEWAY_TOKEN` |
 
-Out of scope: marketing broadcasts, and the machine-to-machine webhook
-service.
+## Webhook events
+
+The machine-to-machine webhook dispatcher (`src/webhooks/`) emits the event
+types below. Integrators subscribing by event name should treat this table as
+the authoritative list; every constant the dispatcher can emit appears here
+with its payload shape.
+
+| Event type | Emitted when | Payload fields |
+|---|---|---|
+| `settlement.started` | A settlement batch begins processing | `settlement_id`, `instrument`, `started_at` |
+| `settlement.completed` | A settlement batch finishes successfully | `settlement_id`, `instrument`, `completed_at` |
+| `settlement.failed` | A settlement batch fails permanently | `settlement_id`, `instrument`, `reason`, `failed_at` |
+| `payout.credited` | A payout is credited to a user | `payout_id`, `user_id`, `amount`, `asset`, `credited_at` |
+| `margin.call` | A user's position falls below the maintenance margin | `user_id`, `instrument`, `shortfall`, `deadline` |
+| `liquidation.warning` | A position is close to liquidation | `user_id`, `instrument`, `health_ratio`, `deadline` |
+| `rollover.executed` | An option position is rolled to a new expiry | `user_id`, `instrument`, `from_expiry`, `to_expiry`, `executed_at` |
+| `expiry.reminder` | An expiry reminder horizon is reached | `user_id`, `instrument`, `expiry`, `horizon_hours` |
+
+Payloads are JSON objects; timestamps are RFC 3339 UTC strings and amounts
+are decimal strings in the asset's smallest unit. Fields are additive —
+consumers must ignore unknown keys.
+
+### Keeping this list in sync
+
+The event names above mirror the constants in the webhook dispatcher source.
+When adding or renaming an event, update this table in the same change and
+cross-check with a grep of the dispatcher for its event constants so the docs
+and code never drift. Do not document events the dispatcher does not emit.
+
+Out of scope: marketing broadcasts.

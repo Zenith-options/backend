@@ -42,6 +42,7 @@ pub struct Metrics {
     channel_lease_wait_duration_seconds: Mutex<f64>,
     channel_sequence_gap_recoveries: AtomicU64,
     channel_sequence_reservations: AtomicU64,
+    rpc_retries: Mutex<BTreeMap<String, u64>>,
 }
 
 static GLOBAL_METRICS: OnceLock<Arc<Metrics>> = OnceLock::new();
@@ -88,6 +89,11 @@ impl Metrics {
         if status == 429 {
             self.rate_limit_rejections.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    pub fn record_rpc_retry(&self, reason: &str) {
+        let mut retries = self.rpc_retries.lock().unwrap();
+        *retries.entry(reason.to_owned()).or_insert(0) += 1;
     }
 
     pub fn record_database_query(&self, duration: Option<Duration>) {
@@ -191,6 +197,20 @@ impl Metrics {
         drop(http);
 
         output.push_str(
+            "# HELP zenith_rpc_retries_total Stellar RPC client retry attempts by reason.\n\
+             # TYPE zenith_rpc_retries_total counter\n",
+        );
+        let rpc_retries = self.rpc_retries.lock().unwrap();
+        for (reason, count) in rpc_retries.iter() {
+            output.push_str(&format!(
+                "zenith_rpc_retries_total{{reason=\"{}\"}} {}\n",
+                escape_label(reason),
+                count
+            ));
+        }
+        drop(rpc_retries);
+
+        output.push_str(
             "# HELP zenith_db_pool_connections Current SQLite pool connections.\n\
              # TYPE zenith_db_pool_connections gauge\n",
         );
@@ -216,130 +236,6 @@ impl Metrics {
             "zenith_db_query_duration_seconds_sum {}\n",
             *self.db_query_duration_seconds.lock().unwrap()
         ));
-
-        output.push_str(
-            "# HELP zenith_background_loop_healthy Whether a background loop completed recently.\n\
-             # TYPE zenith_background_loop_healthy gauge\n",
-        );
-        for (name, healthy) in loop_health {
-            output.push_str(&format!(
-                "zenith_background_loop_healthy{{name=\"{name}\"}} {}\n",
-                u8::from(healthy)
-            ));
-        }
-
-        output.push_str(
-            "# HELP zenith_websocket_connections Active WebSocket connections.\n\
-             # TYPE zenith_websocket_connections gauge\n",
-        );
-        output.push_str(&format!(
-            "zenith_websocket_connections {}\n",
-            self.websocket_connections.load(Ordering::Relaxed)
-        ));
-        output.push_str(
-            "# HELP zenith_positions_opened_total Positions opened since process start.\n\
-             # TYPE zenith_positions_opened_total counter\n",
-        );
-        output.push_str(&format!(
-            "zenith_positions_opened_total {}\n",
-            self.positions_opened.load(Ordering::Relaxed)
-        ));
-        output.push_str(
-            "# HELP zenith_positions_closed_total Positions closed since process start.\n\
-             # TYPE zenith_positions_closed_total counter\n",
-        );
-        output.push_str(&format!(
-            "zenith_positions_closed_total {}\n",
-            self.positions_closed.load(Ordering::Relaxed)
-        ));
-        output.push_str(
-            "# HELP zenith_premium_volume_total Premium volume traded since process start.\n\
-             # TYPE zenith_premium_volume_total counter\n",
-        );
-        output.push_str(&format!(
-            "zenith_premium_volume_total {}\n",
-            *self.premium_volume.lock().unwrap()
-        ));
-        output.push_str(
-            "# HELP zenith_collateral_locked Current collateral locked by positions.\n\
-             # TYPE zenith_collateral_locked gauge\n",
-        );
-        output.push_str(&format!(
-            "zenith_collateral_locked {}\n",
-            *self.collateral_locked.lock().unwrap()
-        ));
-        output.push_str(
-            "# HELP zenith_alert_triggers_total Alerts triggered since process start.\n\
-             # TYPE zenith_alert_triggers_total counter\n",
-        );
-        output.push_str(&format!(
-            "zenith_alert_triggers_total {}\n",
-            self.alert_triggers.load(Ordering::Relaxed)
-        ));
-        output.push_str(
-            "# HELP zenith_rate_limit_rejections_total Requests rejected by rate limits.\n\
-             # TYPE zenith_rate_limit_rejections_total counter\n",
-        );
-        output.push_str(&format!(
-            "zenith_rate_limit_rejections_total {}\n",
-            self.rate_limit_rejections.load(Ordering::Relaxed)
-        ));
-        output.push_str(
-            "# HELP zenith_channel_pool_size Configured channel account pool size.\n\
-             # TYPE zenith_channel_pool_size gauge\n",
-        );
-        output.push_str(&format!(
-            "zenith_channel_pool_size {}\n",
-            self.channel_pool_size.load(Ordering::Relaxed)
-        ));
-        output.push_str(
-            "# HELP zenith_channel_pool_leased Channel accounts currently leased.\n\
-             # TYPE zenith_channel_pool_leased gauge\n",
-        );
-        output.push_str(&format!(
-            "zenith_channel_pool_leased {}\n",
-            self.channel_pool_leased.load(Ordering::Relaxed)
-        ));
-        output.push_str(
-            "# HELP zenith_channel_pool_quarantined Channel accounts quarantined as unhealthy.\n\
-             # TYPE zenith_channel_pool_quarantined gauge\n",
-        );
-        output.push_str(&format!(
-            "zenith_channel_pool_quarantined {}\n",
-            self.channel_pool_quarantined.load(Ordering::Relaxed)
-        ));
-        output.push_str(
-            "# HELP zenith_channel_lease_waits_total Total channel lease acquisition waits.\n\
-             # TYPE zenith_channel_lease_waits_total counter\n",
-        );
-        output.push_str(&format!(
-            "zenith_channel_lease_waits_total {}\n",
-            self.channel_lease_waits.load(Ordering::Relaxed)
-        ));
-        output.push_str(
-            "# HELP zenith_channel_lease_wait_duration_seconds_sum Total time spent waiting for a channel lease.\n\
-             # TYPE zenith_channel_lease_wait_duration_seconds_sum counter\n",
-        );
-        output.push_str(&format!(
-            "zenith_channel_lease_wait_duration_seconds_sum {}\n",
-            *self.channel_lease_wait_duration_seconds.lock().unwrap()
-        ));
-        output.push_str(
-            "# HELP zenith_channel_sequence_gap_recoveries_total Sequence gaps recovered via on-chain reconciliation.\n\
-             # TYPE zenith_channel_sequence_gap_recoveries_total counter\n",
-        );
-        output.push_str(&format!(
-            "zenith_channel_sequence_gap_recoveries_total {}\n",
-            self.channel_sequence_gap_recoveries.load(Ordering::Relaxed)
-        ));
-        output.push_str(
-            "# HELP zenith_channel_sequence_reservations_total Sequence numbers reserved in batches.\n\
-             # TYPE zenith_channel_sequence_reservations_total counter\n",
-        );
-        output.push_str(&format!(
-            "zenith_channel_sequence_reservations_total {}\n",
-            self.channel_sequence_reservations.load(Ordering::Relaxed)
-        ));
         output
     }
 }
@@ -353,89 +249,5 @@ impl Drop for WebSocketConnection {
 }
 
 fn escape_label(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('\n', "\\n")
-        .replace('"', "\\\"")
-}
-
-pub struct SqlxQueryMetricsLayer;
-
-impl SqlxQueryMetricsLayer {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for SqlxQueryMetricsLayer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<S: Subscriber> Layer<S> for SqlxQueryMetricsLayer {
-    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
-        if !event.metadata().target().starts_with("sqlx::query") {
-            return;
-        }
-        let mut visitor = QueryDurationVisitor::default();
-        event.record(&mut visitor);
-        let duration = visitor
-            .elapsed_secs
-            .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
-            .or_else(|| visitor.elapsed.as_deref().and_then(parse_duration));
-        global().record_database_query(duration);
-        crate::telemetry::record_database_query(duration);
-    }
-}
-
-#[derive(Default)]
-struct QueryDurationVisitor {
-    elapsed: Option<String>,
-    elapsed_secs: Option<f64>,
-}
-
-impl tracing::field::Visit for QueryDurationVisitor {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "elapsed" {
-            self.elapsed = Some(format!("{value:?}"));
-        }
-    }
-
-    fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
-        if field.name() == "elapsed_secs" && value.is_finite() && value >= 0.0 {
-            self.elapsed_secs = Some(value);
-        }
-    }
-}
-
-fn parse_duration(value: &str) -> Option<Duration> {
-    let (number, multiplier) = if let Some(value) = value.strip_suffix("ns") {
-        (value.trim(), 1e-9)
-    } else if let Some(value) = value
-        .strip_suffix("µs")
-        .or_else(|| value.strip_suffix("us"))
-    {
-        (value.trim(), 1e-6)
-    } else if let Some(value) = value.strip_suffix("ms") {
-        (value.trim(), 1e-3)
-    } else {
-        (value.strip_suffix('s')?.trim(), 1.0)
-    };
-    let seconds = number.parse::<f64>().ok()? * multiplier;
-    (seconds.is_finite() && seconds >= 0.0).then(|| Duration::from_secs_f64(seconds))
-}
-
-pub async fn handler(State(state): State<AppState>) -> impl IntoResponse {
-    let healthy = state.operations.background_loop_health();
-    let body = state
-        .metrics
-        .exposition(state.db.size(), state.db.num_idle(), healthy.into_iter());
-    (
-        [(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
-        )],
-        body,
-    )
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
