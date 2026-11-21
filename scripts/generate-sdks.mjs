@@ -35,6 +35,31 @@ const runGenerator = (generator, output, properties) => {
   if (result.status !== 0) throw new Error(`${generator} SDK generation failed`);
 };
 
+// openapi/openapi.yaml is the single source of truth. Regenerate the derived
+// openapi/openapi.json from it so the two documents cannot drift apart.
+const regenerateJsonSpec = () => {
+  const result = spawnSync(
+    "docker",
+    [
+      "run",
+      "--rm",
+      "-v",
+      `${root}:/local`,
+      image,
+      "generate",
+      "-i",
+      spec,
+      "-g",
+      "openapi",
+      "-o",
+      "/local/openapi/.generation",
+    ],
+    { stdio: "inherit" },
+  );
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error("openapi.json regeneration failed");
+};
+
 await mkdir(resolve(root, "sdk/typescript"), { recursive: true });
 await mkdir(resolve(root, "sdk/rust"), { recursive: true });
 const temporaryRoot = resolve(root, "sdk/.generation");
@@ -42,6 +67,15 @@ const temporaryTypeScript = resolve(temporaryRoot, "typescript");
 const temporaryRust = resolve(temporaryRoot, "rust");
 await rm(temporaryRoot, { recursive: true, force: true });
 await mkdir(temporaryRoot, { recursive: true });
+
+const jsonGenerationRoot = resolve(root, "openapi/.generation");
+await rm(jsonGenerationRoot, { recursive: true, force: true });
+regenerateJsonSpec();
+await rename(
+  resolve(jsonGenerationRoot, "openapi.json"),
+  resolve(root, "openapi/openapi.json"),
+);
+await rm(jsonGenerationRoot, { recursive: true, force: true });
 
 try {
   runGenerator(

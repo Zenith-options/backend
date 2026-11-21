@@ -50,6 +50,15 @@ export const options = {
   },
 };
 
+// Precompute the token set once in setup() so per-iteration loops do not
+// regenerate/sign tokens. Tokens are validated here and reused across VUs.
+export function setup() {
+  if (!loadedTokens.length) {
+    throw new Error("authenticated scenarios require TRADER_TOKENS (one bearer token per VU)");
+  }
+  return { tokens: loadedTokens };
+}
+
 function request(method, path, body, token) {
   const headers = { "Content-Type": "application/json" };
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -71,15 +80,16 @@ export function browseMarket() {
   sleep(Math.random() * 2 + 0.5);
 }
 
-function sessionToken() {
-  if (!loadedTokens.length) {
+function sessionToken(data) {
+  const tokens = (data && data.tokens) || loadedTokens;
+  if (!tokens.length) {
     throw new Error("authenticated scenarios require TRADER_TOKENS (one bearer token per VU)");
   }
-  return loadedTokens[(__VU - 1) % loadedTokens.length];
+  return tokens[(__VU - 1) % tokens.length];
 }
 
-export function trade() {
-  const token = sessionToken();
+export function trade(data) {
+  const token = sessionToken(data);
   const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
   const opened = http.post(
     `${baseUrl}/api/v1/positions/open`,
@@ -119,8 +129,8 @@ export function subscribe() {
   sleep(1);
 }
 
-export function manageAlerts() {
-  const token = sessionToken();
+export function manageAlerts(data) {
+  const token = sessionToken(data);
   const created = request("POST", "/api/v1/alerts", {
     underlying: "BTC",
     condition: Math.random() < 0.5 ? "above" : "below",

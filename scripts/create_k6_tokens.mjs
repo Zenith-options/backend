@@ -69,4 +69,7 @@ for (let i = 0; i < tokenCount; i++) {
   tokens.push(token);
   await new Promise((resolve) => setTimeout(resolve, 450));
 }
-process.stdout.write(`${tokens.join(",")}\n`);
+
+// Emit a JSON array so k6 scenarios can load the precomputed token set once in
+// setup() and reuse it across iterations instead of signing tokens per VU loop.
+process.stdout.write(`${JSON.stringify(tokens)}\n`);

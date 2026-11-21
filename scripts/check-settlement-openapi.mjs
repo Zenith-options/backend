@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 const source = read("src/lib.rs");
-const jsonSpec = JSON.parse(read("openapi.json"));
+const jsonSpec = JSON.parse(read("openapi/openapi.json"));
 const yamlSpec = read("openapi/openapi.yaml");
 const required = [
   "/api/v1/keeper/bounties",
