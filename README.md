@@ -324,3 +324,6 @@ MIT © Zenith Protocol Contributors
 
 <!-- handsoff-issue-417 -->
 - #417: Settlement worker logs no context when a saga step fails
+
+<!-- handsoff-issue-419 -->
+- #419: Oracle price fetch failures do not record which provider or URL failed
