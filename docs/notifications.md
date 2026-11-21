@@ -84,3 +84,13 @@ stored in the outbox.
 
 Out of scope: marketing broadcasts, and the machine-to-machine webhook
 service.
+
+## Webhook payloads
+
+Webhook deliveries are machine-to-machine and are not governed by the
+preference rules above. Every webhook payload carries a `description` field:
+a single human-readable sentence derived from the event type by the webhook
+module's event-to-description mapping. It is never supplied by the caller, so
+a consumer can announce the event to a user without interpreting the machine
+identifier. An event type that has no mapping is rejected loudly rather than
+emitted with an empty description.
