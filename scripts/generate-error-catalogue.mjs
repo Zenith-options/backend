@@ -8,9 +8,11 @@ const lines = [
   "",
   "| Code | HTTP status | Meaning |",
   "|---|---:|---|",
-  ...entries.map(({ code, http_status, description }) =>
-    `| \`${code}\` | ${Array.isArray(http_status) ? http_status.join(", ") : http_status} | ${description} |`,
-  ),
+  ...entries.map(({ code, status, http_status, description }) => {
+    const resolved = status ?? http_status;
+    const rendered = Array.isArray(resolved) ? resolved.join(", ") : resolved;
+    return `| \`${code}\` | ${rendered} | ${description} |`;
+  }),
   "",
 ];
 await writeFile("docs/error-catalogue.md", lines.join("\n"));

@@ -319,3 +319,8 @@ rather than just assumed from reading the SQL.
 ## License
 
 MIT © Zenith Protocol Contributors
+
+## Handsoff notes
+
+<!-- handsoff-issue-393 -->
+- #393: `docs/chain-api.md` documents a `GET /chain/status` endpoint that does not exist
