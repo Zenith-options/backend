@@ -41,6 +41,16 @@ sha256() { sha256sum "$1" | cut -d' ' -f1; }
 need jq
 need sha256sum
 
+# Preflight: verify the Soroban / Stellar CLI is available before doing any
+# work.  Commands that don't call the CLI (check-manifest, build) still
+# benefit from an early, legible error rather than a raw "command not found"
+# buried inside a long run.
+if ! command -v "$STELLAR" >/dev/null 2>&1; then
+  echo "error: Soroban CLI ('$STELLAR') not found on PATH." >&2
+  echo "       Install it by following the instructions in docs/contract-builds.md" >&2
+  exit 1
+fi
+
 # Prints the manifest problems, one per line. Mirrors PinManifest::validate
 # in src/contract_pins.rs so CI catches a bad pin without building Rust.
 manifest_problems() {
