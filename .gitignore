@@ -1,3 +1,4 @@
+
 /target
 /sdk/**/target/
 /sdk/**/node_modules/
@@ -10,3 +11,24 @@
 *.db-journal
 /archives/
 .vscode/
+
+# Test snapshots
+*.snap
+*.snap.new
+**/__snapshots__/
+
+# Fuzz artifacts (crash inputs — do not commit, they may contain sensitive data)
+/fuzz/artifacts/
+
+# Coverage output
+*.profraw
+*.profdata
+lcov.info
+coverage.xml
+tarpaulin-report.html
+
+# OS / editor noise
+Thumbs.db
+*.swp
+*.swo
+*~
