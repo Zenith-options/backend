@@ -71,22 +71,33 @@ resource_fee = max(minResourceFee,
 ```
 
 The price sheet (`ResourcePricing`) is in stroops per unit and defaults to 1
-stroop per unit. `minResourceFee` — the minimum the node itself charges — is
-always a lower bound, so a mis-calibrated price sheet can only ever
-over-collect, never under-collect.
+stroop per unit (`DEFAULT_FEE_PER_*` in `src/chain/simulate.rs`).
+`minResourceFee` — the minimum the node itself charges — is always a lower
+bound, so a mis-calibrated price sheet can only ever over-collect, never
+under-collect. There is no fractional rounding: `resource_fee_for` multiplies
+integer resource counts by the integer rates and clamps with
+`max(minResourceFee, 0)`.
 
 ## The inclusion fee
 
 `InclusionFeeStrategy` bids a percentile of the inclusion fees the network
-recently accepted:
+recently accepted. Source of truth for every default below: `src/chain/fees.rs`
+(`InclusionFeeStrategy::default()` and its `DEFAULT_*` constants). Amounts are
+integer stroops; `src/amounts.rs::STROOPS_PER_UNIT` is 10_000_000, so 100 stroops
+is 0.00001 XLM.
 
 | Parameter | Env var | Default | Meaning |
 |---|---|---|---|
 | `percentile` | `ZENITH_FEE_PERCENTILE` | 90 | which percentile of the recent distribution to bid |
-| `floor_stroops` | `ZENITH_FEE_FLOOR_STROOPS` | 100 | lower bound of the bid; below this the transaction risks being dropped |
-| `ceiling_stroops` | `ZENITH_FEE_CEILING_STROOPS` | 100 000 (0.1 XLM) | upper bound of the bid |
-| `per_transaction_cap_stroops` | `ZENITH_FEE_PER_TX_CAP_STROOPS` | 500 000 (0.5 XLM) | upper bound of the **total** fee (resource + inclusion) for one transaction |
-| `daily_budget_stroops` | `ZENITH_FEE_DAILY_BUDGET_STROOPS` | 5 000 000 (5 XLM) | rolling 24h budget for inclusion fees |
+| `floor_stroops` | `ZENITH_FEE_FLOOR_STROOPS` | 100 (0.00001 XLM) | lower bound of the bid; below this the transaction risks being dropped |
+| `ceiling_stroops` | `ZENITH_FEE_CEILING_STROOPS` | 100 000 (0.01 XLM) | upper bound of the bid |
+| `per_transaction_cap_stroops` | `ZENITH_FEE_PER_TX_CAP_STROOPS` | 500 000 (0.05 XLM) | upper bound of the **total** fee (resource + inclusion) for one transaction |
+| `daily_budget_stroops` | `ZENITH_FEE_DAILY_BUDGET_STROOPS` | 5 000 000 (0.5 XLM) | rolling 24h budget for inclusion fees |
+
+`FeeStats::percentile` resolves the configured value to a reported bucket:
+0..=50 uses p50, 51..=75 uses p75, 76..=90 uses p90, 91..=95 uses p95, and
+anything higher uses p99. Fees stay in whole stroops: there is no fractional
+fee rounding in this module.
 
 The selection is:
 
@@ -99,8 +110,8 @@ The selection is:
 
 **When the node does not serve fee statistics** (older testnet nodes do not
 implement `getFeeStats`), the bid falls back to the floor instead of failing
-the submission. The reason for the bid is recorded as `floor` in the audit
-trail.
+the submission. The reason is recorded as `floor` in the audit trail; the same
+source is used when a percentile bid clamps down to the floor.
 
 **The percentile is the default, not a constant.** A p90 bid is included
 without paying the p99, and it is still high enough to be included in a
