@@ -2,6 +2,11 @@
 members = [".", "fuzz"]
 exclude = ["contracts/options", "contracts/oracle"]
 
+[workspace.dependencies]
+# Pin vulnerable crates to patched versions (RUSTSEC-2026-0459, RUSTSEC-2023-0071, RUSTSEC-2026-0384, RUSTSEC-2026-0592, RUSTSEC-2026-0486)
+tokio = { version = "1.54.1", features = ["full"] }
+rustix = "1.1.6"
+
 # When building fuzz targets in release mode (cargo fuzz run ...) we want
 # debug info so crash stack traces are symbolised.  This is a workspace-level
 # profile so it applies to both the main crate and the fuzz crate.
@@ -20,7 +25,6 @@ autobins = false
 # Only the targets declared below are built. `src/bin/` also holds tool
 # scripts from earlier iterations that were never wired into this package's
 # dependency set; automatic discovery would try to build them all.
-autobins = false
 
 [[bin]]
 name = "zenith-backend"
@@ -30,14 +34,18 @@ path = "src/main.rs"
 axum = { version = "0.7", features = ["ws"] }
 anyhow = "1"
 async-graphql = { version = "=7.2.1", features = ["dataloader"] }
-tokio = { version = "1", features = ["full"] }
+tokio = { workspace = true }
+rustix = { workspace = true }
+# Security patches for transitive dependencies (override versions)
+rsa = "0.10.0"
+url = "2.5.9"
 tower-http = { version = "0.5", features = ["cors", "trace", "request-id", "compression-gzip", "compression-br", "compression-zstd"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "postgres", "migrate", "macros", "time", "chrono", "uuid", "json", "rust_decimal"] }
+sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "postgres", "migrate", "macros", "time", "chrono", "uuid", "json", "rust_decimal", "sqlite-bundled"] }
 dotenvy = "0.15"
 toml = "0.8"
 httpdate = "1"
@@ -70,12 +78,6 @@ utoipa = { version = "5", features = ["axum_extras", "time"] }
 utoipa-swagger-ui = { version = "8", features = ["axum"] }
 async-trait = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-chrono = "0.4"
-base64 = "0.22"
-futures = "0.3"
-rust_decimal = "1"
-validator = { version = "0.18", features = ["derive"] }
-utoipa = { version = "4", features = ["axum_extras"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

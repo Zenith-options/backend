@@ -93,6 +93,7 @@ doc = false
 name = "settlement_saga"
 path = "fuzz_targets/settlement_saga.rs"
 
+[[bin]]
 name = "min_received"
 path = "fuzz_targets/min_received.rs"
 test = false
