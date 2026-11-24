@@ -106,10 +106,42 @@ Each run:
 
 ## Adding a new target
 
-1. Create `fuzz/fuzz_targets/<name>.rs`.
-2. Add a `[[bin]]` entry to `fuzz/Cargo.toml`.
-3. Add seed inputs to `fuzz/corpus/<name>/`.
-4. Add `<name>` to both `matrix.target` lists in `.github/workflows/fuzz.yml`.
+Use [`fuzz_targets/cursor_query.rs`](fuzz_targets/cursor_query.rs) as a template:
+a target is a `#![no_main]` file that declares
+`libfuzzer_sys::fuzz_target!(|data: &[u8]| { ... })` and asserts the properties
+that must hold for every input. No new target is added by this guide; it only
+documents the steps.
+
+1. Create `fuzz/fuzz_targets/<name>.rs` following that template (from this
+   README the same file is `fuzz_targets/<name>.rs`). Use lowercase with
+   underscores for `<name>`: it is the binary name, the corpus directory and
+   the `cargo fuzz run` argument.
+2. Register the target in `fuzz/Cargo.toml` with its own `[[bin]]` entry.
+   Paths in that file are relative to `fuzz/`:
+
+   ```toml
+   [[bin]]
+   name = "<name>"
+   path = "fuzz_targets/<name>.rs"
+   test = false
+   doc = false
+   ```
+
+3. Seed `fuzz/corpus/<name>/`: **one file per seed**, each named
+   descriptively after the case it covers. For example,
+   `fuzz/corpus/cursor_query/` contains `default_page`, `min_limit`,
+   `over_max_clamped`, `non_numeric`, `i64_max`, etc. The filename is the
+   documentation, so prefer `empty_object` over `seed1`.
+4. Add `<name>` to both `matrix.target` lists in `.github/workflows/fuzz.yml`
+   (PR/push and nightly) so CI picks the target up.
+5. Smoke-test from the **workspace root**, not from `fuzz/`:
+
+   ```bash
+   cargo fuzz run <name> fuzz/corpus/<name> -- -timeout=30 -max_total_time=60
+   ```
+
+   libFuzzer grows the committed corpus with new interesting inputs and writes
+   crashes to `fuzz/artifacts/<name>/`; see "Investigating a crash" above.
 
 ---
 
