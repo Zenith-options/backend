@@ -5,10 +5,40 @@
 //! cargo bench --bench iv
 //! ```
 //!
+//! To run a specific case only:
+//! ```text
+//! cargo bench --bench iv -- implied_vol/atm-1y-20vol
+//! ```
+//!
+//! To output results in a machine-readable format (JSON):
+//! ```text
+//! cargo bench --bench iv -- --output-format json
+//! ```
+//!
 //! The benchmark exercises the safeguarded Newton/Brent solver across a grid
 //! of moneyness, expiry and volatility values that cover the acceptance
 //! criteria of issue #21 (vol in [0.01, 10], T in [1 hour, 3 years],
 //! moneyness in [0.2, 5]).
+//!
+//! **Reading the output**
+//! - Criterion reports time per iteration in nanoseconds (ns/iter).
+//! - Lower is better. Typical values for this solver: 1,000–10,000 ns/iter depending on case difficulty.
+//! - The `Throughput` column shows elements per second (1 / time_per_iter).
+//! - Each case label encodes: moneyness (spot/strike ratio), expiry in years, input volatility.
+//!   Examples: `atm-1y-20vol` = at-the-money, 1 year expiry, 20% vol.
+//! - The grid covers:
+//!   - ATM (moneyness 1.0) at 1h, 1y, 3y with 20% vol
+//!   - Deep OTM (0.2) at 1y with 20% vol, 1h with 80% vol
+//!   - Deep ITM (5.0) at 1y with 20% vol, 3y with 1% vol
+//!   - OTM (0.5) at 1h with 1000% vol (extreme edge case)
+//! - Acceptance criteria (issue #21): solver must converge within 50 iterations
+//!   and return a vol within 1% relative error of the input vol across the grid.
+//!
+//! **Interpreting performance changes**
+//! - A regression > 20% in ns/iter warrants investigation (algorithm change, not noise).
+//! - Compare `cargo bench --bench iv` before and after changes using `cargo bench --bench iv -- --save-baseline main` and `cargo bench --bench iv -- --baseline main`.
+//!
+//! **Dependencies**: requires the `option-pricing` crate (internal) with the `implied_vol` function.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
