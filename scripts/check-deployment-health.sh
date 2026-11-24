@@ -11,9 +11,11 @@ for attempt in $(seq 1 24); do
   if curl --fail --silent --show-error "$url" >/dev/null 2>&1; then
     echo "Deployment health check passed"
     exit 0
+  else
+    curl_status=$?
   fi
   sleep 5
 done
 
-echo "Deployment health check failed after 120 seconds: $url" >&2
+echo "Deployment health check failed after 120 seconds: $url (curl exit code: ${curl_status:-unknown})" >&2
 exit 1
