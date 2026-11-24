@@ -1,5 +1,9 @@
 # Index audit
 
+**Audited on 2026-11-24.** Every file path referenced below was resolved
+against the current `main` tree on that date (see the path check in the PR
+for this refresh); no moved paths remain in this document.
+
 Every production query's index coverage, verified by the performance
 regression suite (`tests/query_plan_test.rs`) which asserts the
 `EXPLAIN QUERY PLAN` output for each query against a large seeded dataset.
